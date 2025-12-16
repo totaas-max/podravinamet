@@ -67,11 +67,11 @@
         border: none;
       }
     </style>
-  <script type="importmap">
+<script type="importmap">
 {
   "imports": {
-    "react": "https://esm.sh/react@^19.2.3",
-    "react/": "https://esm.sh/react@^19.2.3/"
+    "react/": "https://esm.sh/react@^19.2.3/",
+    "react": "https://esm.sh/react@^19.2.3"
   }
 }
 </script>
@@ -91,6 +91,7 @@
         HOME: 'home',
         RADAR: 'radar',
         AGRO: 'agro',
+        NEWS: 'news',
         SETTINGS: 'settings'
       };
 
@@ -123,6 +124,18 @@
         'fog': { icon: 'foggy', class: 'text-gray-400' },
         'thunder': { icon: 'thunderstorm', class: 'text-purple-500' }
       };
+
+      // --- VIJESTI I ZANIMLJIVOSTI ---
+      const newsData = [
+          {
+          id: 1,
+          title: "Meteo portal Podravina",
+          date: "16.12.2025.",
+          image: "https://explore-croatia.net/wp-content/uploads/2021/05/DJI_0149-700x510.jpg", 
+          summary: "Meteo portal Podravina",
+          content: "Od danas je počeo sa radom meteo portal s fokusom na Podravinu. Na ovom meteoportalu moguće je pronaći trenutne temperature izmjerene na DHMZ mreži meteoroloških postaja, prognoze vremena za odabrane lokacije, radarsku sliku oborine, agro savjete i lokalne meteo zanimljivosti. "
+        },
+      ];
 
       // --- State ---
       let state = {
@@ -167,7 +180,13 @@
         // Warnings
         warnings: { today: [], tomorrow: [], dayAfter: [] },
         showWarningsModal: false,
-        warningTab: 'today' 
+        warningTab: 'today',
+
+        // News
+        selectedNews: null,
+
+        // Air Quality
+        aqi: null
       };
 
       let mapInstance = null;
@@ -250,7 +269,39 @@
           return { time: timeStr, date: dateStr };
       }
 
+      function getAqiStatus(val) {
+          if (val === null || val === undefined) return { label: '--', color: 'text-gray-400', icon: 'help' };
+          if(val < 20) return { label: 'Dobro', color: 'text-green-500', icon: 'check_circle' };
+          if(val < 40) return { label: 'Prihvatljivo', color: 'text-teal-500', icon: 'thumb_up' };
+          if(val < 60) return { label: 'Umjereno', color: 'text-yellow-500', icon: 'sentiment_neutral' };
+          if(val < 80) return { label: 'Loše', color: 'text-orange-500', icon: 'sentiment_dissatisfied' };
+          if(val < 100) return { label: 'Jako loše', color: 'text-red-500', icon: 'warning' };
+          return { label: 'Opasno', color: 'text-purple-500', icon: 'error' };
+      }
+
       // --- Logic: Data Fetching ---
+
+      async function fetchAirQuality() {
+         const activeLoc = getActiveLocation();
+         const lat = activeLoc.lat || 46.16;
+         const lon = activeLoc.lon || 16.83;
+         
+         const url = `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${lat}&longitude=${lon}&current=european_aqi`;
+         
+         try {
+             const res = await fetch(url);
+             const data = await res.json();
+             if (data.current && typeof data.current.european_aqi !== 'undefined') {
+                 state.aqi = data.current.european_aqi;
+             } else {
+                 state.aqi = null;
+             }
+             if (state.activeTab === VIEW_STATE.HOME) updateDashboard();
+         } catch (e) {
+             console.error("AQI fetch failed", e);
+             state.aqi = null;
+         }
+      }
 
       async function fetchForecastData() {
          const activeLoc = getActiveLocation();
@@ -307,7 +358,8 @@
                   temp: temp,
                   symbol: symbolCode,
                   precip: precip,
-                  wind: point.data.instant.details.wind_speed
+                  wind: point.data.instant.details.wind_speed,
+                  windDir: point.data.instant.details.wind_from_direction
               });
           });
 
@@ -733,6 +785,21 @@
           render();
       }
 
+      function openNewsModal(newsId) {
+          const item = newsData.find(n => n.id === newsId);
+          if (item) {
+              state.selectedNews = item;
+              render();
+              document.body.style.overflow = 'hidden';
+          }
+      }
+
+      function closeNewsModal() {
+          state.selectedNews = null;
+          render();
+          document.body.style.overflow = '';
+      }
+
       // --- Main Logic Cont ---
 
       function getUserLocation() {
@@ -747,6 +814,7 @@
                       
                       findNearestStation();
                       fetchForecastData(); 
+                      fetchAirQuality();
                       if (state.activeTab === VIEW_STATE.HOME) {
                           updateDashboard();
                           updateMapMarkers(); 
@@ -755,10 +823,12 @@
                   (error) => {
                       console.log("Geolocation denied or failed, using default.");
                       fetchForecastData(); 
+                      fetchAirQuality();
                   }
               );
           } else {
              fetchForecastData();
+             fetchAirQuality();
              findNearestStation();
           }
       }
@@ -811,6 +881,24 @@
           
           if (state.lastUpdated) {
             setTxt('last-updated-time', state.lastUpdated.split(' ')[1].slice(0,5));
+          }
+
+          // AQI Update
+          const aqiEl = document.getElementById('widget-aqi');
+          const aqiLabelEl = document.getElementById('widget-aqi-label');
+          const aqiIconEl = document.getElementById('widget-aqi-icon');
+          
+          if(aqiEl) {
+              const aqiData = getAqiStatus(state.aqi);
+              aqiEl.textContent = state.aqi !== null ? state.aqi : '--';
+              if(aqiLabelEl) {
+                  aqiLabelEl.textContent = aqiData.label;
+                  aqiLabelEl.className = `text-xs font-bold uppercase tracking-wide ${aqiData.color}`;
+              }
+              if(aqiIconEl) {
+                  aqiIconEl.textContent = aqiData.icon;
+                  aqiIconEl.className = `material-symbols-outlined text-2xl ${aqiData.color}`;
+              }
           }
       }
 
@@ -883,6 +971,7 @@
           
           findNearestStation();
           fetchForecastData();
+          fetchAirQuality();
       }
 
       function addGpsLocation() {
@@ -1194,6 +1283,7 @@
           { id: VIEW_STATE.HOME, label: 'Početna', icon: 'home' },
           { id: VIEW_STATE.RADAR, label: 'Radar', icon: 'map' },
           { id: VIEW_STATE.AGRO, label: 'Agro', icon: 'agriculture' },
+          { id: VIEW_STATE.NEWS, label: 'Vijesti', icon: 'newspaper' },
           { id: VIEW_STATE.SETTINGS, label: 'Postavke', icon: 'settings' }
         ];
         const mobileNavHtml = `
@@ -1341,6 +1431,26 @@
         // Use forecast (p_ssz) for the Home screen card
         const agroForecastText = agroMeteo.forecast ? agroMeteo.forecast.substring(0, 150) + (agroMeteo.forecast.length > 150 ? '...' : '') : "Dohvaćanje agrometeorološke prognoze...";
 
+        // News Slider for Home Screen
+        const newsSliderHtml = newsData.map(news => `
+            <div onclick="openNewsModal(${news.id})" class="min-w-[260px] max-w-[260px] snap-center flex flex-col gap-2 cursor-pointer group">
+                <div class="w-full h-32 rounded-xl overflow-hidden bg-gray-100 dark:bg-gray-800 relative shadow-sm border border-gray-100 dark:border-gray-800">
+                    ${news.image ? `<img src="${news.image}" class="w-full h-full object-cover group-hover:scale-105 transition duration-500" alt="${news.title}" />` : 
+                    `<div class="w-full h-full flex items-center justify-center text-gray-300 dark:text-gray-600"><span class="material-symbols-outlined text-4xl">image</span></div>`}
+                    <div class="absolute bottom-2 left-2 bg-white/90 dark:bg-black/60 px-2 py-0.5 rounded-md text-[10px] font-bold shadow-sm backdrop-blur-sm text-[#111418] dark:text-white">
+                        ${news.date}
+                    </div>
+                </div>
+                <div>
+                    <h4 class="font-bold text-sm text-[#111418] dark:text-white leading-tight mb-1 group-hover:text-primary transition-colors line-clamp-2">${news.title}</h4>
+                    <p class="text-xs text-gray-500 dark:text-gray-400 line-clamp-2">${news.summary}</p>
+                </div>
+            </div>
+        `).join('');
+
+        // AQI Data
+        const aqiData = getAqiStatus(state.aqi);
+
         return `
           <div class="fade-in flex flex-col gap-4 p-4 pb-28 md:p-8 max-w-7xl mx-auto w-full">
             <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -1376,7 +1486,9 @@
                     <span id="hero-temp" class="text-6xl md:text-7xl font-bold text-primary tracking-tighter">${temp}</span>
                   </div>
                 </div>
-                <div class="grid grid-cols-3 gap-4">
+                
+                <!-- Stats Grid (Added AQI) -->
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
                   <div class="flex flex-col gap-2 rounded-2xl bg-white dark:bg-surface-dark p-4 shadow-sm border border-gray-100 dark:border-gray-800 items-center text-center transition hover:shadow-md">
                     <span class="material-symbols-outlined text-primary text-2xl">air</span>
                     <div>
@@ -1396,6 +1508,15 @@
                      <div>
                       <p id="widget-pressure" class="text-[#111418] dark:text-white text-xl font-bold">${pressure}</p>
                       <p class="text-gray-400 text-xs font-bold uppercase tracking-wide">Tlak</p>
+                    </div>
+                  </div>
+                  <!-- AQI Widget -->
+                  <div class="flex flex-col gap-2 rounded-2xl bg-white dark:bg-surface-dark p-4 shadow-sm border border-gray-100 dark:border-gray-800 items-center text-center transition hover:shadow-md">
+                    <span id="widget-aqi-icon" class="material-symbols-outlined text-2xl ${aqiData.color}">${aqiData.icon}</span>
+                     <div>
+                      <p id="widget-aqi" class="text-[#111418] dark:text-white text-xl font-bold">${state.aqi !== null ? state.aqi : '--'}</p>
+                      <p id="widget-aqi-label" class="text-xs font-bold uppercase tracking-wide ${aqiData.color}">${aqiData.label}</p>
+                      <p class="text-gray-400 text-[9px] font-bold uppercase tracking-wide mt-1">Kvaliteta Zraka</p>
                     </div>
                   </div>
                 </div>
@@ -1432,8 +1553,21 @@
                 </div>
               </div>
             </div>
+
+            <!-- Lokalne Zanimljivosti Section -->
+            <div class="mt-4 pt-6 border-t border-gray-200 dark:border-gray-800">
+                <div class="flex justify-between items-center mb-4">
+                    <h3 class="text-lg font-bold text-[#111418] dark:text-white">Lokalne Zanimljivosti</h3>
+                    <button onclick="navigate('${VIEW_STATE.NEWS}')" class="text-primary text-sm font-bold hover:underline">Sve vijesti</button>
+                </div>
+                <div class="flex overflow-x-auto gap-4 pb-4 -mx-4 px-4 snap-x hide-scrollbar">
+                    ${newsSliderHtml}
+                </div>
+            </div>
+
             ${state.selectedDay ? renderHourlyModal(state.selectedDay) : ''}
             ${state.showWarningsModal ? renderWarningsModal() : ''}
+            ${state.selectedNews ? renderNewsModal() : ''}
           </div>
         `;
       }
@@ -1501,9 +1635,11 @@
                             <span class="text-xs font-bold text-blue-600 dark:text-blue-400">${h.precip.toFixed(1)}</span>
                         </div>` : '<span class="text-xs text-gray-300">-</span>'}
                     </div>
-                    <div class="flex items-center justify-end gap-1 text-xs text-gray-500">
-                        <span class="material-symbols-outlined text-[14px]">air</span>
-                        <span>${Math.round(h.wind)} m/s</span>
+                    <div class="flex items-center justify-end gap-2 text-xs text-gray-500">
+                        <div title="Smjer vjetra: ${h.windDir}°" class="flex items-center justify-center w-6 h-6 rounded-full bg-gray-100 dark:bg-gray-800">
+                            <span class="material-symbols-outlined text-[14px] text-gray-700 dark:text-gray-300" style="transform: rotate(${h.windDir}deg)">navigation</span>
+                        </div>
+                        <span class="min-w-[40px] text-right">${Math.round(h.wind)} m/s</span>
                     </div>
                 </div>
               `;
@@ -1546,6 +1682,36 @@
                     <div class="flex justify-between items-center">
                        <span class="flex items-center gap-1"><span class="material-symbols-outlined text-[14px]">update</span> Ažurirano:</span>
                        <span class="font-bold text-gray-700 dark:text-gray-300">${state.forecastUpdated || '--:--'}</span>
+                    </div>
+                </div>
+              </div>
+            </div>
+          `;
+      }
+
+      function renderNewsModal() {
+          const news = state.selectedNews;
+          if (!news) return '';
+
+          return `
+            <div class="fixed inset-0 z-[100] flex items-center justify-center p-4">
+              <div class="absolute inset-0 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200" onclick="closeNewsModal()"></div>
+              <div class="relative bg-white dark:bg-[#1e2936] w-full max-w-2xl max-h-[90vh] rounded-2xl shadow-2xl flex flex-col overflow-hidden animate-in zoom-in-95 duration-200 border border-gray-100 dark:border-gray-700">
+                <div class="relative h-48 md:h-64 bg-gray-200 dark:bg-gray-800">
+                    ${news.image ? `<img src="${news.image}" class="w-full h-full object-cover" alt="${news.title}" />` : 
+                    `<div class="w-full h-full flex items-center justify-center text-gray-300 dark:text-gray-600"><span class="material-symbols-outlined text-6xl">image</span></div>`}
+                    <button onclick="closeNewsModal()" class="absolute top-4 right-4 bg-black/50 hover:bg-black/70 text-white rounded-full p-2 transition">
+                        <span class="material-symbols-outlined">close</span>
+                    </button>
+                </div>
+                <div class="flex-1 overflow-y-auto p-6">
+                    <div class="flex items-center gap-2 mb-3 text-sm text-gray-500 dark:text-gray-400">
+                        <span class="material-symbols-outlined text-lg">calendar_today</span>
+                        <span>${news.date}</span>
+                    </div>
+                    <h2 class="text-2xl font-bold text-[#111418] dark:text-white mb-4 leading-tight">${news.title}</h2>
+                    <div class="prose dark:prose-invert max-w-none text-gray-700 dark:text-gray-300 leading-relaxed">
+                        ${news.content}
                     </div>
                 </div>
               </div>
@@ -1803,6 +1969,43 @@
           `;
       }
 
+      function renderNews() {
+          const newsList = newsData.map(news => `
+            <div onclick="openNewsModal(${news.id})" class="flex flex-col bg-white dark:bg-surface-dark rounded-xl overflow-hidden shadow-sm border border-gray-100 dark:border-gray-800 cursor-pointer hover:shadow-md transition group">
+                <div class="h-48 md:h-56 bg-gray-200 dark:bg-gray-800 overflow-hidden relative">
+                    ${news.image ? `<img src="${news.image}" class="w-full h-full object-cover group-hover:scale-105 transition duration-500" alt="${news.title}" />` : 
+                    `<div class="w-full h-full flex items-center justify-center text-gray-300 dark:text-gray-600"><span class="material-symbols-outlined text-6xl">image</span></div>`}
+                </div>
+                <div class="p-5 flex flex-col gap-2">
+                    <div class="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400 mb-1">
+                        <span class="material-symbols-outlined text-sm">calendar_today</span>
+                        <span>${news.date}</span>
+                    </div>
+                    <h3 class="text-xl font-bold text-[#111418] dark:text-white leading-tight group-hover:text-primary transition-colors">${news.title}</h3>
+                    <p class="text-sm text-gray-600 dark:text-gray-400 leading-relaxed line-clamp-3">${news.summary}</p>
+                    <div class="mt-4 pt-3 border-t border-gray-100 dark:border-gray-800 text-primary text-sm font-bold flex items-center gap-1">
+                        Pročitaj više <span class="material-symbols-outlined text-sm">arrow_forward</span>
+                    </div>
+                </div>
+            </div>
+          `).join('');
+
+          return `
+            <div class="fade-in flex flex-col gap-6 p-4 md:p-8 max-w-3xl mx-auto w-full pb-28">
+                <div class="flex flex-col gap-1 mt-2">
+                    <h1 class="text-2xl font-bold tracking-tight text-[#111418] dark:text-white">Lokalne Zanimljivosti</h1>
+                    <p class="text-gray-500 dark:text-gray-400 text-sm">Meteorološki događaji i zanimljivosti iz Podravine.</p>
+                </div>
+                
+                <div class="flex flex-col gap-6">
+                    ${newsList}
+                </div>
+                
+                ${state.selectedNews ? renderNewsModal() : ''}
+            </div>
+          `;
+      }
+
       function renderSettings() {
         const locationsList = state.locations.map((loc, index) => {
             const isActive = index === state.activeLocationIndex;
@@ -1923,6 +2126,9 @@
             break;
           case VIEW_STATE.AGRO:
             contentHtml += renderAgro();
+            break;
+          case VIEW_STATE.NEWS:
+            contentHtml += renderNews();
             break;
           case VIEW_STATE.SETTINGS:
             contentHtml += renderSettings();
