@@ -1,0 +1,1767 @@
+<!DOCTYPE html>
+<html lang="hr" class="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>Podravina Meteo</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+    <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet" />
+    <!-- Leaflet CSS & JS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+    <!-- Proj4js for Coordinate Conversion -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/proj4js/2.11.0/proj4.js"></script>
+    
+    <script>
+      tailwind.config = {
+        darkMode: "class",
+        theme: {
+          extend: {
+            colors: {
+              "primary": "#137fec",
+              "background-light": "#f6f7f8",
+              "background-dark": "#101922",
+              "surface-light": "#ffffff",
+              "surface-dark": "#1e2936",
+            },
+            fontFamily: {
+              "display": ["Inter", "sans-serif"],
+              "sans": ["Inter", "sans-serif"]
+            },
+          },
+        },
+      }
+    </script>
+    <style>
+      body {
+        -webkit-tap-highlight-color: transparent;
+      }
+      .hide-scrollbar::-webkit-scrollbar {
+        display: none;
+      }
+      .hide-scrollbar {
+        -ms-overflow-style: none;
+        scrollbar-width: none;
+      }
+      .pb-safe {
+        padding-bottom: env(safe-area-inset-bottom, 20px);
+      }
+      .fade-in {
+        animation: fadeIn 0.3s ease-in;
+      }
+      @keyframes fadeIn {
+        from { opacity: 0; }
+        to { opacity: 1; }
+      }
+      /* Leaflet Customizations */
+      .leaflet-container {
+        font-family: 'Inter', sans-serif;
+        background: #e5e7eb;
+      }
+      .dark .leaflet-container {
+        background: #374151;
+      }
+      .custom-div-icon {
+        background: transparent;
+        border: none;
+      }
+    </style>
+  <script type="importmap">
+{
+  "imports": {
+    "react": "https://esm.sh/react@^19.2.3",
+    "react/": "https://esm.sh/react@^19.2.3/"
+  }
+}
+</script>
+<link rel="stylesheet" href="/index.css">
+</head>
+  <body class="bg-background-light dark:bg-background-dark text-[#111418] dark:text-white font-display antialiased selection:bg-blue-100 selection:text-blue-900 overflow-x-hidden">
+    
+    <!-- App Container -->
+    <div id="app" class="flex flex-col min-h-screen md:flex-row">
+      <!-- Content injected by JS -->
+    </div>
+
+    <script>
+      // --- Constants & Data ---
+      
+      const VIEW_STATE = {
+        HOME: 'home',
+        RADAR: 'radar',
+        AGRO: 'agro',
+        SETTINGS: 'settings'
+      };
+
+      const LAYER_TYPES = {
+          TEMP: 'temp',
+          WIND: 'wind',
+          HUMIDITY: 'humidity',
+          PRESSURE: 'pressure'
+      };
+
+      const MEASUREMENT_IDS = {
+          30: 'temp',       // Temperatura
+          31: 'windSpeed',  // Brzina vjetra
+          32: 'windDir',    // Smjer vjetra
+          33: 'humidity',   // Relativna vlažnost
+          5: 'pressure'     // Tlak zraka
+      };
+
+      // MET Norway symbol mapping to Material Symbols
+      const MET_SYMBOLS = {
+        'clearsky': { icon: 'sunny', class: 'text-amber-500' },
+        'fair': { icon: 'partly_cloudy_day', class: 'text-amber-400' },
+        'partlycloudy': { icon: 'partly_cloudy_day', class: 'text-gray-500' },
+        'cloudy': { icon: 'cloud', class: 'text-gray-500' },
+        'rainshowers': { icon: 'rainy', class: 'text-blue-400' },
+        'rain': { icon: 'rainy', class: 'text-blue-500' },
+        'heavyrain': { icon: 'thunderstorm', class: 'text-blue-700' },
+        'sleet': { icon: 'weather_snowy', class: 'text-cyan-500' },
+        'snow': { icon: 'ac_unit', class: 'text-cyan-300' },
+        'fog': { icon: 'foggy', class: 'text-gray-400' },
+        'thunder': { icon: 'thunderstorm', class: 'text-purple-500' }
+      };
+
+      // --- State ---
+      let state = {
+        activeTab: VIEW_STATE.HOME,
+        activeLayer: LAYER_TYPES.TEMP,
+        stationsMap: new Map(), 
+        nearestStation: null,
+        
+        // Locations Management
+        locations: [], // Array of { id, name, type: 'gps'|'manual', lat, lon }
+        activeLocationIndex: 0,
+        
+        // UI Search State
+        searchQuery: '',
+        searchResults: [],
+        isSearching: false,
+
+        forecastData: [], // Array of daily forecasts
+        hourlyData: {}, // Object map: date -> array of hourly objects
+        selectedDay: null, // Date string for modal
+        forecastUpdated: null, // Timestamp of last forecast fetch
+        isForecastExpanded: false, // 3 vs 7 days toggle
+        agroData: [],
+        isAgroLoading: false,
+        isLoading: false,
+        lastUpdated: null,
+        radarPlaying: false,
+        radarFrames: [], 
+        currentRadarIndex: 0,
+
+        // Warnings
+        warnings: { today: [], tomorrow: [], dayAfter: [] },
+        showWarningsModal: false,
+        warningTab: 'today' // today, tomorrow, dayAfter
+      };
+
+      let mapInstance = null;
+      let markersLayer = null;
+      let radarInterval = null;
+      let searchTimeout = null;
+
+      const app = document.getElementById('app');
+
+      // --- Logic: Utils ---
+
+      function getDistanceFromLatLonInKm(lat1, lon1, lat2, lon2) {
+        var R = 6371; 
+        var dLat = deg2rad(lat2-lat1);  
+        var dLon = deg2rad(lon2-lon1); 
+        var a = 
+          Math.sin(dLat/2) * Math.sin(dLat/2) +
+          Math.cos(deg2rad(lat1)) * Math.cos(deg2rad(lat2)) * 
+          Math.sin(dLon/2) * Math.sin(dLon/2)
+          ; 
+        var c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a)); 
+        var d = R * c; 
+        return d;
+      }
+
+      function deg2rad(deg) {
+        return deg * (Math.PI/180)
+      }
+
+      function categorizeTitle(title) {
+        const t = title.toLowerCase();
+        if (t.includes('jabuk') || t.includes('krusk') || t.includes('breskv') || t.includes('sljiv') || t.includes('visnj') || t.includes('voc') || t.includes('nasad') || t.includes('vinograd') || t.includes('loz')) {
+          return { name: 'Voćarstvo', icon: 'pest_control', color: 'text-red-600', bg: 'bg-red-50 dark:bg-red-900/20' };
+        }
+        if (t.includes('psenic') || t.includes('jecam') || t.includes('kukuruz') || t.includes('soj') || t.includes('uljan') || t.includes('repic') || t.includes('ratar')) {
+          return { name: 'Ratarstvo', icon: 'bug_report', color: 'text-amber-600', bg: 'bg-amber-50 dark:bg-amber-900/20' };
+        }
+        if (t.includes('povrc') || t.includes('kupus') || t.includes('luk') || t.includes('salat') || t.includes('rajcic') || t.includes('paprik')) {
+          return { name: 'Povrtlarstvo', icon: 'potted_plant', color: 'text-green-600', bg: 'bg-green-50 dark:bg-green-900/20' };
+        }
+        return { name: 'Aktualno', icon: 'agriculture', color: 'text-blue-600', bg: 'bg-blue-50 dark:bg-blue-900/20' };
+      }
+
+      function saveLocations() {
+          localStorage.setItem('pm_locations', JSON.stringify(state.locations));
+          localStorage.setItem('pm_active_index', state.activeLocationIndex);
+      }
+
+      function loadLocations() {
+          const storedLocs = localStorage.getItem('pm_locations');
+          const storedIndex = localStorage.getItem('pm_active_index');
+          
+          if (storedLocs) {
+              state.locations = JSON.parse(storedLocs);
+              state.activeLocationIndex = storedIndex ? parseInt(storedIndex) : 0;
+              // Validate index
+              if (state.activeLocationIndex >= state.locations.length) state.activeLocationIndex = 0;
+          } else {
+              // Default
+              state.locations = [{ id: 'gps', name: 'Moja Lokacija (GPS)', type: 'gps', lat: 46.16, lon: 16.83 }];
+              state.activeLocationIndex = 0;
+          }
+      }
+
+      function getActiveLocation() {
+          return state.locations[state.activeLocationIndex];
+      }
+
+      function formatWarningTime(isoString) {
+          if (!isoString) return { time: '--:--', date: '' };
+          const date = new Date(isoString);
+          const today = new Date();
+          const tomorrow = new Date(today);
+          tomorrow.setDate(tomorrow.getDate() + 1);
+          
+          const timeStr = date.toLocaleTimeString('hr-HR', { hour: '2-digit', minute: '2-digit' });
+          let dateStr = date.toLocaleDateString('hr-HR', { day: 'numeric', month: 'short' });
+          
+          if (date.toDateString() === today.toDateString()) dateStr = 'Danas';
+          else if (date.toDateString() === tomorrow.toDateString()) dateStr = 'Sutra';
+          
+          return { time: timeStr, date: dateStr };
+      }
+
+      // --- Logic: Data Fetching ---
+
+      async function fetchForecastData() {
+         const activeLoc = getActiveLocation();
+         
+         // If GPS is active but lat/lon not yet set, wait or use default
+         const lat = activeLoc.lat || 46.16;
+         const lon = activeLoc.lon || 16.83;
+
+         const url = `https://api.met.no/weatherapi/locationforecast/2.0/compact?lat=${lat}&lon=${lon}`;
+         const proxyUrl = 'https://corsproxy.io/?' + encodeURIComponent(url);
+
+         try {
+             const res = await fetch(proxyUrl);
+             if(!res.ok) throw new Error("Forecast fetch failed");
+             const json = await res.json();
+             processForecastData(json);
+         } catch (e) {
+             console.error("Forecast error:", e);
+         }
+      }
+
+      function processForecastData(data) {
+          if (!data || !data.properties || !data.properties.timeseries) return;
+
+          const dailyGroups = {};
+
+          data.properties.timeseries.forEach(point => {
+              const date = point.time.split('T')[0];
+              const time = point.time.split('T')[1].substring(0, 5); // HH:MM
+              
+              if (!dailyGroups[date]) {
+                  dailyGroups[date] = {
+                      temps: [],
+                      symbols: [],
+                      precipTotal: 0,
+                      hours: [] // Store hourly details
+                  };
+              }
+              // Temp
+              const temp = point.data.instant.details.air_temperature;
+              dailyGroups[date].temps.push(temp);
+              
+              // Precipitation
+              const precip = point.data.next_1_hours?.details?.precipitation_amount || point.data.next_6_hours?.details?.precipitation_amount || 0;
+              dailyGroups[date].precipTotal += precip;
+
+              // Symbol
+              const next12 = point.data.next_12_hours?.summary?.symbol_code;
+              const next6 = point.data.next_6_hours?.summary?.symbol_code;
+              const next1 = point.data.next_1_hours?.summary?.symbol_code;
+              const symbolCode = next1 || next6 || next12;
+
+              if (next12) dailyGroups[date].symbols.push(next12);
+              else if (next6) dailyGroups[date].symbols.push(next6);
+              else if (next1) dailyGroups[date].symbols.push(next1);
+
+              // Add to hourly list
+              dailyGroups[date].hours.push({
+                  time: time,
+                  temp: temp,
+                  symbol: symbolCode,
+                  precip: precip,
+                  wind: point.data.instant.details.wind_speed
+              });
+          });
+
+          // Convert to array
+          const today = new Date().toISOString().split('T')[0];
+          state.hourlyData = {}; // Reset hourly map
+
+          const forecastList = Object.keys(dailyGroups).sort().map(date => {
+               const dayData = dailyGroups[date];
+               const min = Math.min(...dayData.temps);
+               const max = Math.max(...dayData.temps);
+               
+               // Store hours in state
+               state.hourlyData[date] = dayData.hours;
+
+               // Pick most frequent symbol
+               let symbolCode = dayData.symbols[Math.floor(dayData.symbols.length / 2)] || 'cloudy';
+               let cleanSymbol = symbolCode.split('_')[0]; 
+               
+               // Format Date
+               const d = new Date(date);
+               const dayName = date === today ? 'Danas' : d.toLocaleDateString('hr-HR', { weekday: 'long' });
+               const formattedDay = dayName.charAt(0).toUpperCase() + dayName.slice(1);
+
+               return {
+                   date: date,
+                   dayName: formattedDay,
+                   min: Math.round(min),
+                   max: Math.round(max),
+                   symbol: cleanSymbol,
+                   origSymbol: symbolCode,
+                   precip: dayData.precipTotal
+               };
+          });
+
+          state.forecastData = forecastList.filter(f => f.date >= today);
+          state.forecastUpdated = new Date().toLocaleTimeString('hr-HR', {hour: '2-digit', minute:'2-digit'});
+          
+          if (state.activeTab === VIEW_STATE.HOME) render();
+      }
+
+      async function fetchAgroData() {
+        if (state.agroData.length > 0) return; 
+
+        state.isAgroLoading = true;
+        render(); 
+
+        const targetUrl = 'https://savjetodavna.mps.hr/preporuke/?tx_post_tag=koprivnicko-krizevacka';
+        const proxyUrl = 'https://corsproxy.io/?' + encodeURIComponent(targetUrl);
+
+        try {
+          const res = await fetch(proxyUrl);
+          const text = await res.text();
+          const parser = new DOMParser();
+          const doc = parser.parseFromString(text, 'text/html');
+          
+          const articles = Array.from(doc.querySelectorAll('article, .post, .news-item, .entry')).slice(0, 10);
+          
+          state.agroData = articles.map((el, index) => {
+            const titleEl = el.querySelector('h1, h2, h3, h4, .entry-title a, .post-title a');
+            const dateEl = el.querySelector('time, .date, .post-date, .entry-date');
+            const summaryEl = el.querySelector('p, .entry-summary, .post-excerpt');
+            const linkEl = el.querySelector('a');
+
+            const title = titleEl ? titleEl.textContent.trim() : 'Savjet bez naslova';
+            const rawDate = dateEl ? dateEl.textContent.trim() : '';
+            const summary = summaryEl ? summaryEl.textContent.trim() : 'Kliknite za više detalja...';
+            const link = linkEl ? linkEl.href : targetUrl;
+            const finalLink = link.startsWith('http') ? link : `https://savjetodavna.mps.hr${link}`;
+            const category = categorizeTitle(title);
+
+            return {
+              id: index,
+              category: category.name,
+              title: title,
+              summary: summary,
+              date: rawDate || 'Nedavno',
+              icon: category.icon,
+              color: category.color,
+              bg: category.bg,
+              link: finalLink
+            };
+          }).filter(item => item.title !== 'Savjet bez naslova');
+
+        } catch (e) {
+          console.error("Agro fetch failed", e);
+          state.agroData = [];
+        } finally {
+          state.isAgroLoading = false;
+          if (state.activeTab === VIEW_STATE.AGRO) render();
+        }
+      }
+
+      function getLatestMeasurementTime() {
+        const now = new Date();
+        const adjusted = new Date(now.getTime() - 20 * 60000); 
+        const minutes = adjusted.getMinutes();
+        const roundedMinutes = minutes - (minutes % 10);
+        adjusted.setMinutes(roundedMinutes);
+        adjusted.setSeconds(0);
+        
+        const pad = (n) => n.toString().padStart(2, '0');
+        const yyyy = adjusted.getFullYear();
+        const mm = pad(adjusted.getMonth() + 1);
+        const dd = pad(adjusted.getDate());
+        const hh = pad(adjusted.getHours());
+        const min = pad(adjusted.getMinutes());
+        const ss = '00';
+        return `${yyyy}-${mm}-${dd} ${hh}:${min}:${ss}`;
+      }
+
+      async function fetchWeatherData() {
+        if (state.stationsMap.size === 0) {
+            state.isLoading = true;
+            render();
+        }
+
+        const timeString = getLatestMeasurementTime();
+        state.lastUpdated = timeString;
+        const proxyUrl = 'https://corsproxy.io/?';
+        const baseUrl = 'https://meteopodaci.dhz.hr/wfs';
+        
+        const requests = Object.keys(MEASUREMENT_IDS).map(id => {
+             const params = new URLSearchParams({
+                request: 'GetFeature',
+                version: '1.1.0',
+                outputFormat: 'application/json',
+                typeName: 'standardna_mjerenja',
+                viewparams: `meteomjernielementid:${id};termin_time:'${timeString}'`
+            });
+            return fetch(`${proxyUrl}${encodeURIComponent(baseUrl + '?' + params.toString())}`)
+                   .then(r => r.json())
+                   .then(data => ({ id, data }))
+                   .catch(e => ({ id, error: e }));
+        });
+
+        try {
+            const results = await Promise.all(requests);
+            
+            const newStationsMap = new Map();
+
+             if (typeof proj4 !== 'undefined') {
+                proj4.defs("EPSG:3765","+proj=tmerc +lat_0=0 +lon_0=16.5 +k=0.9999 +x_0=500000 +y_0=0 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs");
+            }
+
+            results.forEach(({id, data}) => {
+                if (data && data.features) {
+                    const propName = MEASUREMENT_IDS[id];
+                    
+                    data.features.forEach(f => {
+                         const rawName = f.properties.naziv_postaje || f.properties.naziv || '';
+                         const cleanName = rawName.split('-')[0].trim();
+                         
+                         if (!newStationsMap.has(cleanName)) {
+                            let x = parseFloat(f.properties.duzina); 
+                            let y = parseFloat(f.properties.sirina);
+                            
+                            if ((isNaN(x) || isNaN(y)) && f.geometry && f.geometry.coordinates) {
+                                x = parseFloat(f.geometry.coordinates[0]);
+                                y = parseFloat(f.geometry.coordinates[1]);
+                            }
+
+                            let lat = y;
+                            let lon = x;
+
+                            if (typeof proj4 !== 'undefined' && !isNaN(x) && !isNaN(y) && (x > 180 || y > 180)) {
+                                try {
+                                    const converted = proj4('EPSG:3765', 'EPSG:4326', [x, y]);
+                                    lon = converted[0];
+                                    lat = converted[1];
+                                } catch (e) {}
+                            }
+                            
+                            newStationsMap.set(cleanName, {
+                                naziv: cleanName,
+                                lat: lat,
+                                lon: lon,
+                                temp: null,
+                                windSpeed: null,
+                                windDir: null,
+                                humidity: null,
+                                pressure: null
+                            });
+                         }
+
+                         const station = newStationsMap.get(cleanName);
+                         const val = parseFloat(f.properties.vrijednost);
+                         if (!isNaN(val)) {
+                             station[propName] = val;
+                         }
+                    });
+                }
+            });
+
+            state.stationsMap = newStationsMap;
+            findNearestStation();
+
+            if (mapInstance && state.activeTab === VIEW_STATE.HOME) {
+                updateMapMarkers();
+            }
+        } catch (e) {
+            console.error("Error fetching weather data", e);
+        } finally {
+            state.isLoading = false;
+            if (state.activeTab === VIEW_STATE.HOME) {
+                if (!mapInstance) render(); 
+                updateDashboard();
+            } else if (state.activeTab !== VIEW_STATE.HOME) {
+                render();
+            }
+        }
+      }
+
+      // --- Meteoalarm / Warnings Logic ---
+
+      async function fetchWarnings() {
+          const urls = {
+              today: 'https://meteo.hr/upozorenja/cap_hr_today.xml',
+              tomorrow: 'https://meteo.hr/upozorenja/cap_hr_tomorrow.xml',
+              dayAfter: 'https://meteo.hr/upozorenja/cap_hr_day_after_tomorrow.xml'
+          };
+          
+          try {
+              const fetchXml = async (url) => {
+                  const res = await fetch('https://corsproxy.io/?' + encodeURIComponent(url));
+                  const text = await res.text();
+                  return parseCapXml(text);
+              };
+
+              const [today, tomorrow, dayAfter] = await Promise.all([
+                  fetchXml(urls.today),
+                  fetchXml(urls.tomorrow),
+                  fetchXml(urls.dayAfter)
+              ]);
+
+              state.warnings = { today, tomorrow, dayAfter };
+              if(state.activeTab === VIEW_STATE.HOME) render();
+
+          } catch (e) {
+              console.error("Failed to fetch warnings", e);
+          }
+      }
+
+      function parseCapXml(xmlString) {
+          const parser = new DOMParser();
+          const xmlDoc = parser.parseFromString(xmlString, "text/xml");
+          const infos = Array.from(xmlDoc.querySelectorAll('info'));
+          
+          // Filter for Zagreb Region AND Croatian language (hr-HR)
+          const zagrebInfos = infos.filter(info => {
+              // 1. Language Filter
+              const lang = info.querySelector('language')?.textContent || '';
+              if (!lang.toLowerCase().includes('hr')) return false;
+
+              // 2. Area Filter
+              const areaDesc = info.querySelector('areaDesc')?.textContent || '';
+              return areaDesc.includes('Zagrebačka regija');
+          });
+
+          return zagrebInfos.map(info => {
+              const severity = info.querySelector('severity')?.textContent || 'Unknown';
+              const event = info.querySelector('event')?.textContent || '';
+              const headline = info.querySelector('headline')?.textContent || '';
+              const description = info.querySelector('description')?.textContent || '';
+              const onset = info.querySelector('onset')?.textContent || '';
+              const expires = info.querySelector('expires')?.textContent || '';
+
+              // Map Severity to Color/Class
+              // CAP: Extreme, Severe, Moderate, Minor, Unknown
+              let color = 'gray';
+              let bg = 'bg-gray-100';
+              let text = 'text-gray-800';
+              let border = 'border-gray-200';
+              let level = 0;
+
+              if (severity === 'Extreme') { // Red
+                  color = 'red'; level = 3;
+                  bg = 'bg-red-50 dark:bg-red-900/30'; text = 'text-red-800 dark:text-red-300'; border = 'border-red-200 dark:border-red-800';
+              } else if (severity === 'Severe') { // Orange
+                  color = 'orange'; level = 2;
+                  bg = 'bg-orange-50 dark:bg-orange-900/30'; text = 'text-orange-800 dark:text-orange-300'; border = 'border-orange-200 dark:border-orange-800';
+              } else if (severity === 'Moderate') { // Yellow
+                  color = 'yellow'; level = 1;
+                  bg = 'bg-amber-50 dark:bg-amber-900/30'; text = 'text-amber-800 dark:text-amber-300'; border = 'border-amber-200 dark:border-amber-800';
+              } else {
+                  color = 'green'; level = 0;
+                  bg = 'bg-green-50 dark:bg-green-900/30'; text = 'text-green-800 dark:text-green-300'; border = 'border-green-200 dark:border-green-800';
+              }
+
+              // Map Event to Icon
+              let icon = 'warning';
+              const ev = event.toLowerCase();
+              if (ev.includes('wind') || ev.includes('vjetar')) icon = 'air';
+              else if (ev.includes('rain') || ev.includes('kiša')) icon = 'rainy';
+              else if (ev.includes('snow') || ev.includes('snijeg') || ev.includes('ice') || ev.includes('led')) icon = 'ac_unit';
+              else if (ev.includes('thunder') || ev.includes('grmljav')) icon = 'thunderstorm';
+              else if (ev.includes('fog') || ev.includes('magla')) icon = 'foggy';
+              else if (ev.includes('heat') || ev.includes('vruć')) icon = 'thermostat';
+              else if (ev.includes('cold') || ev.includes('hladn')) icon = 'severe_cold';
+
+              return { severity, event, headline, description, onset, expires, color, bg, text, border, icon, level };
+          }).sort((a, b) => b.level - a.level); // Sort by severity (highest first)
+      }
+
+      function openWarningsModal(tab = 'today') {
+          state.warningTab = tab;
+          state.showWarningsModal = true;
+          render();
+          document.body.style.overflow = 'hidden';
+      }
+
+      function closeWarningsModal() {
+          state.showWarningsModal = false;
+          render();
+          document.body.style.overflow = '';
+      }
+
+      function switchWarningTab(tab) {
+          state.warningTab = tab;
+          render();
+      }
+
+      // --- Main Logic Cont ---
+
+      function getUserLocation() {
+          const activeLoc = getActiveLocation();
+          
+          // Only fetch geolocation if current active location is type 'gps'
+          if (activeLoc.type === 'gps' && navigator.geolocation) {
+              navigator.geolocation.getCurrentPosition(
+                  (position) => {
+                      // Update the GPS location in state
+                      state.locations[state.activeLocationIndex].lat = position.coords.latitude;
+                      state.locations[state.activeLocationIndex].lon = position.coords.longitude;
+                      saveLocations();
+                      
+                      findNearestStation();
+                      fetchForecastData(); // Fetch forecast for new location
+                      if (state.activeTab === VIEW_STATE.HOME) {
+                          updateDashboard();
+                          updateMapMarkers(); 
+                      }
+                  },
+                  (error) => {
+                      console.log("Geolocation denied or failed, using default.");
+                      fetchForecastData(); 
+                  }
+              );
+          } else {
+             fetchForecastData();
+             findNearestStation();
+          }
+      }
+
+      function findNearestStation() {
+          const activeLoc = getActiveLocation();
+          const targetLat = activeLoc.lat || 46.16;
+          const targetLon = activeLoc.lon || 16.83;
+
+          if (state.stationsMap.size === 0) {
+              const def = state.stationsMap.get('Koprivnica') || Array.from(state.stationsMap.values())[0];
+              state.nearestStation = def;
+              return;
+          }
+
+          let minInfo = { dist: Infinity, station: null };
+          
+          state.stationsMap.forEach(station => {
+              if (station.lat && station.lon) {
+                  const dist = getDistanceFromLatLonInKm(targetLat, targetLon, station.lat, station.lon);
+                  if (dist < minInfo.dist) {
+                      minInfo = { dist, station };
+                  }
+              }
+          });
+          
+          if (minInfo.station) {
+              state.nearestStation = minInfo.station;
+          }
+      }
+
+      function updateDashboard() {
+          const s = state.nearestStation;
+          if (!s) return;
+
+          const activeLoc = getActiveLocation();
+          
+          const setTxt = (id, val) => {
+              const el = document.getElementById(id);
+              if (el) el.textContent = val;
+          };
+
+          // If manual location, show its name, else show nearest station or "Moja Lokacija"
+          const displayCity = activeLoc.type === 'manual' ? activeLoc.name : s.naziv;
+
+          setTxt('hero-city', displayCity);
+          setTxt('hero-temp', s.temp !== null ? s.temp.toFixed(1) + '°' : '--');
+          setTxt('widget-wind', s.windSpeed !== null ? s.windSpeed.toFixed(1) : '--');
+          setTxt('widget-humidity', s.humidity !== null ? s.humidity.toFixed(0) + '%' : '--%');
+          setTxt('widget-pressure', s.pressure !== null ? s.pressure.toFixed(0) : '--');
+          
+          if (state.lastUpdated) {
+            setTxt('last-updated-time', state.lastUpdated.split(' ')[1].slice(0,5));
+          }
+      }
+
+      function toggleForecast() {
+          state.isForecastExpanded = !state.isForecastExpanded;
+          render();
+      }
+
+      function openHourlyModal(date) {
+          state.selectedDay = date;
+          render();
+          document.body.style.overflow = 'hidden';
+      }
+
+      function closeHourlyModal() {
+          state.selectedDay = null;
+          render();
+          document.body.style.overflow = '';
+      }
+
+      // --- Settings Logic ---
+
+      async function searchPlaces(query) {
+          if (!query || query.length < 3) {
+              state.searchResults = [];
+              render();
+              return;
+          }
+          
+          state.isSearching = true;
+          render();
+
+          try {
+              const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&accept-language=hr`);
+              const data = await res.json();
+              state.searchResults = data.map(place => ({
+                  name: place.display_name.split(',')[0],
+                  fullName: place.display_name,
+                  lat: parseFloat(place.lat),
+                  lon: parseFloat(place.lon)
+              }));
+          } catch(e) {
+              console.error(e);
+          } finally {
+              state.isSearching = false;
+              render();
+          }
+      }
+
+      function handleSearchInput(e) {
+          state.searchQuery = e.target.value;
+          if (searchTimeout) clearTimeout(searchTimeout);
+          searchTimeout = setTimeout(() => searchPlaces(state.searchQuery), 500);
+      }
+
+      function addLocation(place) {
+          const newLoc = {
+              id: Date.now(),
+              name: place.name,
+              type: 'manual',
+              lat: place.lat,
+              lon: place.lon
+          };
+          state.locations.push(newLoc);
+          state.activeLocationIndex = state.locations.length - 1; // Auto select new
+          state.searchQuery = '';
+          state.searchResults = [];
+          saveLocations();
+          render();
+          
+          // Refresh data for new location
+          findNearestStation();
+          fetchForecastData();
+      }
+
+      function addGpsLocation() {
+          // Check if GPS already exists
+          const exists = state.locations.find(l => l.type === 'gps');
+          if (!exists) {
+              state.locations.unshift({
+                  id: 'gps',
+                  name: 'Moja Lokacija (GPS)',
+                  type: 'gps',
+                  lat: null, // Will be filled by geolocation
+                  lon: null
+              });
+              state.activeLocationIndex = 0;
+              saveLocations();
+              getUserLocation();
+              render();
+          }
+      }
+
+      function removeLocation(index) {
+          if (state.locations[index].type === 'gps') return; // Prevent removing GPS if logic requires it, but UI handles it
+          
+          state.locations.splice(index, 1);
+          if (state.activeLocationIndex >= index && state.activeLocationIndex > 0) {
+              state.activeLocationIndex--;
+          }
+          saveLocations();
+          render();
+          
+          // Refresh
+          getUserLocation(); // Trigger refresh based on new active
+      }
+
+      function setActiveLocation(index) {
+          state.activeLocationIndex = index;
+          saveLocations();
+          render();
+          getUserLocation(); // Trigger refresh
+      }
+
+      // --- Map Logic (Home) ---
+      function initMap() {
+          const mapEl = document.getElementById('map-home');
+          if (!mapEl) return;
+          if (mapInstance) mapInstance.remove();
+
+          const activeLoc = getActiveLocation();
+          const lat = activeLoc.lat || 46.16;
+          const lon = activeLoc.lon || 16.83;
+
+          mapInstance = L.map('map-home', {
+              zoomControl: false,
+              attributionControl: false
+          }).setView([lat, lon], 9);
+
+          L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: 'OSM' }).addTo(mapInstance);
+          markersLayer = L.layerGroup().addTo(mapInstance);
+          updateMapMarkers();
+          setTimeout(() => { mapInstance.invalidateSize(); }, 200);
+      }
+
+      function switchLayer(layerType) {
+          state.activeLayer = layerType;
+          
+          document.querySelectorAll('.layer-btn').forEach(btn => {
+              if (btn.dataset.layer === layerType) {
+                  btn.classList.add('bg-primary', 'text-white', 'border-transparent');
+                  btn.classList.remove('bg-white', 'text-gray-700', 'border-gray-200');
+              } else {
+                  btn.classList.remove('bg-primary', 'text-white', 'border-transparent');
+                  btn.classList.add('bg-white', 'text-gray-700', 'border-gray-200');
+              }
+          });
+
+          updateMapMarkers();
+      }
+
+      function updateMapMarkers() {
+          if (!mapInstance || !markersLayer) return;
+          markersLayer.clearLayers();
+          
+          state.stationsMap.forEach(station => {
+              if (station.lat && station.lon) {
+                  let html = '';
+                  let val = null;
+                  
+                  switch(state.activeLayer) {
+                      case LAYER_TYPES.TEMP:
+                          val = station.temp;
+                          if (val !== null) {
+                              html = `
+                                <div class="flex flex-col items-center group cursor-pointer hover:-translate-y-1 transition-transform z-10" style="width: 40px;">
+                                  <div class="bg-white dark:bg-[#1e2936] px-2 py-1 rounded-lg shadow-lg mb-1 border border-primary/20 flex items-center justify-center min-w-[36px]">
+                                    <span class="text-xs font-bold text-primary whitespace-nowrap">${val.toFixed(1)}°</span>
+                                  </div>
+                                  <span class="material-symbols-outlined text-primary text-3xl drop-shadow-md -mt-1">location_on</span>
+                                </div>`;
+                          }
+                          break;
+                      case LAYER_TYPES.WIND:
+                          val = station.windSpeed;
+                          if (val !== null) {
+                              const rot = station.windDir || 0;
+                              html = `
+                                <div class="flex flex-col items-center justify-center" style="width: 40px;">
+                                   <div class="w-8 h-8 rounded-full bg-white dark:bg-[#1e2936] shadow-md flex items-center justify-center border border-green-500/30">
+                                      <span class="material-symbols-outlined text-green-600 text-xl" style="transform: rotate(${rot}deg)">navigation</span>
+                                   </div>
+                                   <span class="text-[10px] font-bold text-green-700 bg-white/80 px-1 rounded mt-1">${val.toFixed(1)}</span>
+                                </div>`;
+                          }
+                          break;
+                      case LAYER_TYPES.HUMIDITY:
+                          val = station.humidity;
+                          if (val !== null) {
+                              html = `
+                                <div class="flex flex-col items-center group cursor-pointer z-10" style="width: 40px;">
+                                  <div class="bg-blue-50 dark:bg-blue-900/40 px-2 py-1 rounded-lg shadow-lg mb-1 border border-blue-500/20 flex items-center justify-center min-w-[36px]">
+                                    <span class="text-xs font-bold text-blue-600 whitespace-nowrap">${val.toFixed(0)}%</span>
+                                  </div>
+                                  <span class="w-2 h-2 bg-blue-500 rounded-full shadow-sm"></span>
+                                </div>`;
+                          }
+                          break;
+                      case LAYER_TYPES.PRESSURE:
+                          val = station.pressure;
+                          if (val !== null) {
+                              html = `
+                                <div class="flex flex-col items-center group cursor-pointer z-10" style="width: 40px;">
+                                  <div class="bg-gray-50 dark:bg-gray-800 px-2 py-1 rounded-lg shadow-lg mb-1 border border-gray-400/20 flex items-center justify-center min-w-[36px]">
+                                    <span class="text-[10px] font-bold text-gray-700 dark:text-gray-300 whitespace-nowrap">${val.toFixed(0)}</span>
+                                  </div>
+                                  <span class="w-2 h-2 bg-gray-500 rounded-full shadow-sm"></span>
+                                </div>`;
+                          }
+                          break;
+                  }
+
+                  if (html) {
+                      const icon = L.divIcon({
+                          className: 'custom-div-icon',
+                          html: html,
+                          iconSize: [40, 50],
+                          iconAnchor: [20, 48] 
+                      });
+                      L.marker([station.lat, station.lon], { icon: icon })
+                        .bindPopup(`<b class="text-sm">${station.naziv}</b>`)
+                        .addTo(markersLayer);
+                  }
+              }
+          });
+
+          // Draw Selected Location (User or Manual)
+          const activeLoc = getActiveLocation();
+          if (activeLoc.lat && activeLoc.lon) {
+               const userIcon = L.divIcon({
+                   className: 'custom-div-icon',
+                   html: `<div class="relative flex h-3 w-3">
+                            <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75"></span>
+                            <span class="relative inline-flex rounded-full h-3 w-3 bg-blue-500 border-2 border-white shadow-md"></span>
+                          </div>`,
+                   iconSize: [12, 12],
+                   iconAnchor: [6, 6]
+               });
+               L.marker([activeLoc.lat, activeLoc.lon], { icon: userIcon, zIndexOffset: 1000 }).addTo(markersLayer);
+          }
+      }
+
+      // --- Radar Logic ---
+      function initRadarMap() {
+        const mapEl = document.getElementById('map-radar');
+        if (!mapEl) return;
+        
+        if (mapInstance) mapInstance.remove();
+
+        const activeLoc = getActiveLocation();
+        const lat = activeLoc.lat || 46.16;
+        const lon = activeLoc.lon || 16.83;
+
+        mapInstance = L.map('map-radar', {
+           zoomControl: false, 
+           attributionControl: false,
+           maxZoom: 12 
+        }).setView([lat, lon], 8);
+
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: 'OSM',
+            maxZoom: 12
+        }).addTo(mapInstance);
+
+        const ProxyWMS = L.TileLayer.WMS.extend({
+            getTileUrl: function(coords) {
+                const url = L.TileLayer.WMS.prototype.getTileUrl.call(this, coords);
+                return 'https://corsproxy.io/?' + encodeURIComponent(url);
+            }
+        });
+
+        state.radarFrames = [];
+        const now = new Date();
+        const buffer = 10; 
+        const minutes = now.getMinutes();
+        const startMinutes = minutes - (minutes % 10) - buffer;
+        now.setMinutes(startMinutes);
+        now.setSeconds(0);
+        now.setMilliseconds(0);
+
+        for (let i = 6; i >= 0; i--) {
+            const t = new Date(now.getTime() - i * 10 * 60000);
+            const pad = (n) => n.toString().padStart(2, '0');
+            const termin = `${t.getFullYear()}-${pad(t.getMonth()+1)}-${pad(t.getDate())} ${pad(t.getHours())}:${pad(t.getMinutes())}:00`;
+            
+            const layer = new ProxyWMS("https://meteopodaci.dhz.hr/wms", {
+                layers: 'radar:mv_117_1',
+                format: 'image/png',
+                transparent: true,
+                uppercase: true, 
+                CQL_FILTER: `termin='${termin}'`,
+                opacity: 0 
+            });
+
+            state.radarFrames.push({
+                layer: layer,
+                time: `${pad(t.getHours())}:${pad(t.getMinutes())}`,
+                timestamp: t.getTime()
+            });
+            
+            layer.addTo(mapInstance);
+        }
+
+        state.currentRadarIndex = state.radarFrames.length - 1;
+        updateRadarFrame();
+        
+        const cities = [
+            {name: "Koprivnica", lat: 46.16, lon: 16.83},
+            {name: "Đurđevac", lat: 46.04, lon: 17.07},
+            {name: "Križevci", lat: 46.02, lon: 16.54}
+        ];
+        cities.forEach(city => {
+            L.marker([city.lat, city.lon], {
+                icon: L.divIcon({
+                    className: 'bg-transparent',
+                    html: `<div class="flex flex-col items-center">
+                             <div class="w-2.5 h-2.5 bg-gray-800 rounded-full shadow-md border-2 border-white"></div>
+                             <span class="text-[11px] font-bold text-gray-800 drop-shadow-sm mt-0.5 bg-white/60 px-1 rounded">${city.name}</span>
+                           </div>`
+                })
+            }).addTo(mapInstance);
+        });
+
+        setTimeout(() => { mapInstance.invalidateSize(); }, 200);
+      }
+
+      function updateRadarFrame() {
+          state.radarFrames.forEach((frame, idx) => {
+              frame.layer.setOpacity(idx === state.currentRadarIndex ? 0.8 : 0);
+          });
+          
+          const slider = document.getElementById('radar-slider');
+          const timeDisplay = document.getElementById('radar-time-display');
+          if (slider) slider.value = state.currentRadarIndex;
+          if (timeDisplay) timeDisplay.textContent = state.radarFrames[state.currentRadarIndex]?.time || '--:--';
+      }
+
+      function toggleRadar() {
+        state.radarPlaying = !state.radarPlaying;
+        const btn = document.getElementById('radar-play-btn');
+        if(btn) {
+           const icon = btn.querySelector('span');
+           icon.textContent = state.radarPlaying ? 'pause' : 'play_arrow';
+        }
+
+        if (state.radarPlaying) {
+            radarInterval = setInterval(() => {
+                state.currentRadarIndex = (state.currentRadarIndex + 1) % state.radarFrames.length;
+                updateRadarFrame();
+            }, 1000); 
+        } else {
+            clearInterval(radarInterval);
+        }
+      }
+
+      function onRadarSliderChange(val) {
+          state.currentRadarIndex = parseInt(val);
+          updateRadarFrame();
+          if (state.radarPlaying) toggleRadar();
+      }
+
+      // --- Navigation & Actions ---
+
+      function navigate(view) {
+        if (state.activeTab === VIEW_STATE.RADAR && view !== VIEW_STATE.RADAR) {
+            clearInterval(radarInterval);
+            state.radarPlaying = false;
+        }
+        
+        state.activeTab = view;
+        render();
+        
+        if (view === VIEW_STATE.AGRO) {
+          fetchAgroData();
+        }
+      }
+
+      // --- Render Components ---
+
+      function renderNav() {
+        const tabs = [
+          { id: VIEW_STATE.HOME, label: 'Početna', icon: 'home' },
+          { id: VIEW_STATE.RADAR, label: 'Radar', icon: 'map' },
+          { id: VIEW_STATE.AGRO, label: 'Agro', icon: 'agriculture' },
+          { id: VIEW_STATE.SETTINGS, label: 'Postavke', icon: 'settings' }
+        ];
+        const mobileNavHtml = `
+          <div class="md:hidden fixed bottom-0 w-full bg-surface-light dark:bg-surface-dark border-t border-gray-200 dark:border-gray-800 pb-safe pt-2 px-6 flex justify-between items-center z-50 h-[80px]">
+            ${tabs.map(tab => {
+              const isActive = state.activeTab === tab.id;
+              return `
+                <button onclick="navigate('${tab.id}')" class="flex flex-col items-center gap-1 w-12 transition-colors duration-200 ${isActive ? 'text-primary' : 'text-gray-500 dark:text-gray-400'}">
+                  <span class="material-symbols-outlined ${isActive ? 'fill-1' : ''}" style="font-variation-settings: 'FILL' ${isActive ? 1 : 0}">
+                    ${tab.icon}
+                  </span>
+                  <span class="text-[10px] font-medium">${tab.label}</span>
+                </button>
+              `;
+            }).join('')}
+          </div>
+        `;
+        const desktopNavHtml = `
+          <div class="hidden md:flex flex-col w-64 fixed h-full bg-surface-light dark:bg-surface-dark border-r border-gray-200 dark:border-gray-800 p-4 z-50">
+            <div class="flex items-center gap-2 mb-8 px-2">
+              <span class="material-symbols-outlined text-primary text-3xl">cloud_circle</span>
+              <h1 class="text-xl font-bold text-[#111418] dark:text-white">Podravina Meteo</h1>
+            </div>
+            <nav class="flex flex-col gap-2">
+              ${tabs.map(tab => {
+                const isActive = state.activeTab === tab.id;
+                return `
+                  <button onclick="navigate('${tab.id}')" class="flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 ${isActive ? 'bg-blue-50 dark:bg-blue-900/20 text-primary font-bold' : 'text-gray-600 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800'}">
+                    <span class="material-symbols-outlined ${isActive ? 'fill-1' : ''}">${tab.icon}</span>
+                    <span class="text-sm">${tab.label}</span>
+                  </button>
+                `;
+              }).join('')}
+            </nav>
+            <div class="mt-auto p-4 bg-gray-50 dark:bg-gray-800/50 rounded-xl">
+               <p class="text-xs text-gray-500 mb-2">Izvor podataka</p>
+               <div class="flex items-center gap-2 mb-1">
+                 <span class="w-1.5 h-1.5 rounded-full bg-green-500"></span>
+                 <span class="text-xs font-bold dark:text-gray-300">DHMZ WFS</span>
+               </div>
+               <div class="flex items-center gap-2">
+                 <span class="w-1.5 h-1.5 rounded-full bg-blue-500"></span>
+                 <span class="text-xs font-bold dark:text-gray-300">MET Norway</span>
+               </div>
+               <div class="flex items-center gap-2 mt-1">
+                 <span class="w-1.5 h-1.5 rounded-full bg-red-500"></span>
+                 <span class="text-xs font-bold dark:text-gray-300">meteo.hr (Meteoalarm)</span>
+               </div>
+            </div>
+          </div>
+        `;
+        return desktopNavHtml + mobileNavHtml;
+      }
+
+      function renderHeader() {
+        return `
+          <div class="md:hidden sticky top-0 z-40 flex items-center bg-surface-light dark:bg-surface-dark p-4 border-b border-gray-200 dark:border-gray-800 justify-between h-16 shadow-sm">
+            <div class="flex items-center gap-2">
+              <span class="material-symbols-outlined text-primary text-2xl">cloud_circle</span>
+              <h2 class="text-lg font-bold text-[#111418] dark:text-white">Podravina Meteo</h2>
+            </div>
+            <div class="flex items-center gap-2">
+               <button class="p-2 rounded-full hover:bg-gray-100 dark:hover:bg-gray-800 text-[#111418] dark:text-white">
+                <span class="material-symbols-outlined">search</span>
+              </button>
+            </div>
+          </div>
+        `;
+      }
+
+      function renderHome() {
+        const s = state.nearestStation || {};
+        const temp = s.temp !== undefined && s.temp !== null ? s.temp.toFixed(1) + '°' : '--';
+        const wind = s.windSpeed !== undefined && s.windSpeed !== null ? s.windSpeed.toFixed(1) : '--';
+        const humidity = s.humidity !== undefined && s.humidity !== null ? s.humidity.toFixed(0) + '%' : '--%';
+        const pressure = s.pressure !== undefined && s.pressure !== null ? s.pressure.toFixed(0) : '--';
+
+        const activeLoc = getActiveLocation();
+        const city = activeLoc.type === 'manual' ? activeLoc.name : s.naziv || 'Učitavanje...';
+
+        // Forecast Generation
+        const displayForecast = state.isForecastExpanded ? state.forecastData : state.forecastData.slice(0, 3);
+        const forecastHtml = displayForecast.map(f => {
+            const symbolData = MET_SYMBOLS[f.symbol] || { icon: 'cloud', class: 'text-gray-400' };
+            const gradient = f.symbol.includes('rain') ? 'from-blue-300 to-blue-500' : 'from-yellow-300 to-orange-400';
+            
+            return renderForecastRow(f.date, f.dayName, f.min, f.max, symbolData.icon, gradient, symbolData.class, f.precip);
+        }).join('');
+
+        // Warning Logic for Dashboard Card
+        let activeWarning = null;
+        let warningLabel = "Nema Upozorenja";
+        let warningDesc = "Nisu izdana upozorenja za Zagrebačku regiju.";
+        let warningColor = "green";
+        let warningIcon = "check_circle";
+        
+        if (state.warnings.today && state.warnings.today.length > 0) {
+            activeWarning = state.warnings.today[0]; // Most severe
+            warningLabel = "Upozorenje za danas";
+        } else if (state.warnings.tomorrow && state.warnings.tomorrow.length > 0) {
+            activeWarning = state.warnings.tomorrow[0];
+            warningLabel = "Upozorenje za sutra";
+        }
+
+        if (activeWarning) {
+            // Translate fallback severity if needed
+            const sevMap = { 'Moderate': 'Umjereno', 'Severe': 'Opasno', 'Extreme': 'Izuzetno opasno' };
+            const translatedSev = sevMap[activeWarning.severity] || activeWarning.severity;
+
+            // Prioritize headline if available, otherwise construct from event + translated severity
+            if (activeWarning.headline) {
+                warningDesc = activeWarning.headline;
+            } else {
+                warningDesc = `${activeWarning.event} - ${translatedSev}`;
+            }
+
+            if (activeWarning.severity === 'Extreme') {
+                warningColor = 'red'; warningIcon = 'warning';
+            } else if (activeWarning.severity === 'Severe') {
+                warningColor = 'orange'; warningIcon = 'warning';
+            } else {
+                warningColor = 'amber'; warningIcon = 'info'; // Moderate
+            }
+        }
+
+        const warningCardHtml = `
+          <div onclick="openWarningsModal('${activeWarning && !state.warnings.today.length ? 'tomorrow' : 'today'}')" class="cursor-pointer bg-${warningColor}-50 dark:bg-${warningColor}-900/20 border border-${warningColor}-200 dark:border-${warningColor}-800 rounded-2xl p-4 flex gap-4 shadow-sm transition hover:shadow-md">
+            <div class="bg-${warningColor}-100 dark:bg-${warningColor}-800/30 p-2 rounded-full h-min">
+               <span class="material-symbols-outlined text-${warningColor}-600 dark:text-${warningColor}-500">${warningIcon}</span>
+            </div>
+            <div class="flex-1">
+               <div class="flex justify-between items-start">
+                 <h4 class="font-bold text-${warningColor}-800 dark:text-${warningColor}-500">${warningLabel}</h4>
+                 <span class="text-xs bg-white/50 dark:bg-black/20 px-2 py-0.5 rounded text-${warningColor}-800 dark:text-${warningColor}-400">meteo.hr</span>
+               </div>
+               <p class="text-sm text-${warningColor}-700 dark:text-${warningColor}-400 mt-1 leading-relaxed line-clamp-2">${warningDesc}</p>
+            </div>
+          </div>
+        `;
+
+        return `
+          <div class="fade-in flex flex-col gap-4 p-4 pb-28 md:p-8 max-w-7xl mx-auto w-full">
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              <div class="lg:col-span-2 flex flex-col gap-6">
+                <!-- Map Container -->
+                <div class="relative w-full h-80 md:h-96 rounded-2xl overflow-hidden shadow-sm group bg-gray-200 dark:bg-gray-700">
+                  <div id="map-home" class="absolute inset-0 z-0"></div>
+                  
+                  <!-- Layer Controls -->
+                  <div class="absolute top-4 right-4 flex gap-2 overflow-x-auto max-w-[90%] hide-scrollbar z-[500]">
+                    <button onclick="switchLayer('${LAYER_TYPES.TEMP}')" data-layer="${LAYER_TYPES.TEMP}" class="layer-btn px-3 py-1.5 rounded-full text-xs font-bold shadow-md transition-all ${state.activeLayer === LAYER_TYPES.TEMP ? 'bg-primary text-white' : 'bg-white text-gray-700'}">Temp</button>
+                    <button onclick="switchLayer('${LAYER_TYPES.WIND}')" data-layer="${LAYER_TYPES.WIND}" class="layer-btn px-3 py-1.5 rounded-full text-xs font-bold shadow-md transition-all ${state.activeLayer === LAYER_TYPES.WIND ? 'bg-primary text-white' : 'bg-white text-gray-700'}">Vjetar</button>
+                    <button onclick="switchLayer('${LAYER_TYPES.HUMIDITY}')" data-layer="${LAYER_TYPES.HUMIDITY}" class="layer-btn px-3 py-1.5 rounded-full text-xs font-bold shadow-md transition-all ${state.activeLayer === LAYER_TYPES.HUMIDITY ? 'bg-primary text-white' : 'bg-white text-gray-700'}">Vlaga</button>
+                    <button onclick="switchLayer('${LAYER_TYPES.PRESSURE}')" data-layer="${LAYER_TYPES.PRESSURE}" class="layer-btn px-3 py-1.5 rounded-full text-xs font-bold shadow-md transition-all ${state.activeLayer === LAYER_TYPES.PRESSURE ? 'bg-primary text-white' : 'bg-white text-gray-700'}">Tlak</button>
+                  </div>
+
+                  <div class="absolute bottom-4 left-4 bg-white/90 dark:bg-black/60 backdrop-blur-sm px-3 py-1.5 rounded-full text-xs font-medium border border-white/20 shadow-sm z-[500]">
+                    Ažurirano: <span id="last-updated-time">${state.lastUpdated ? state.lastUpdated.split(' ')[1].slice(0,5) : '--:--'}</span>
+                  </div>
+                </div>
+
+                <!-- Info Cards -->
+                <div class="flex flex-col md:flex-row md:items-end justify-between gap-4">
+                  <div>
+                    <div class="flex items-center gap-2 text-primary text-sm font-bold mb-1 uppercase tracking-wider">
+                      <span class="material-symbols-outlined text-lg">my_location</span>
+                      <span>Odabrana lokacija</span>
+                    </div>
+                    <h1 id="hero-city" class="text-4xl md:text-5xl font-bold tracking-tight text-[#111418] dark:text-white">${city}</h1>
+                    <p class="text-gray-500 dark:text-gray-400 font-medium text-lg mt-1">Trenutni podaci (najbliža postaja)</p>
+                  </div>
+                  <div class="text-right">
+                    <span id="hero-temp" class="text-6xl md:text-7xl font-bold text-primary tracking-tighter">${temp}</span>
+                  </div>
+                </div>
+                <div class="grid grid-cols-3 gap-4">
+                  <div class="flex flex-col gap-2 rounded-2xl bg-white dark:bg-surface-dark p-4 shadow-sm border border-gray-100 dark:border-gray-800 items-center text-center transition hover:shadow-md">
+                    <span class="material-symbols-outlined text-primary text-2xl">air</span>
+                    <div>
+                      <p id="widget-wind" class="text-[#111418] dark:text-white text-xl font-bold">${wind} <span class="text-sm font-normal text-gray-500">m/s</span></p>
+                      <p class="text-gray-400 text-xs font-bold uppercase tracking-wide">Vjetar</p>
+                    </div>
+                  </div>
+                  <div class="flex flex-col gap-2 rounded-2xl bg-white dark:bg-surface-dark p-4 shadow-sm border border-gray-100 dark:border-gray-800 items-center text-center transition hover:shadow-md">
+                    <span class="material-symbols-outlined text-primary text-2xl">humidity_percentage</span>
+                     <div>
+                      <p id="widget-humidity" class="text-[#111418] dark:text-white text-xl font-bold">${humidity}</p>
+                      <p class="text-gray-400 text-xs font-bold uppercase tracking-wide">Vlaga</p>
+                    </div>
+                  </div>
+                  <div class="flex flex-col gap-2 rounded-2xl bg-white dark:bg-surface-dark p-4 shadow-sm border border-gray-100 dark:border-gray-800 items-center text-center transition hover:shadow-md">
+                    <span class="material-symbols-outlined text-primary text-2xl">compress</span>
+                     <div>
+                      <p id="widget-pressure" class="text-[#111418] dark:text-white text-xl font-bold">${pressure}</p>
+                      <p class="text-gray-400 text-xs font-bold uppercase tracking-wide">Tlak</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div class="flex flex-col gap-6">
+                ${warningCardHtml}
+                
+                <div class="bg-white dark:bg-surface-dark rounded-2xl p-6 shadow-sm border border-gray-100 dark:border-gray-800">
+                  <div class="flex items-center justify-between mb-6">
+                    <h3 class="text-[#111418] dark:text-white text-lg font-bold">Prognoza</h3>
+                    <button onclick="toggleForecast()" class="text-primary text-sm font-bold hover:underline">
+                        ${state.isForecastExpanded ? 'Manje' : '7 Dana'}
+                    </button>
+                  </div>
+                  <div class="flex flex-col gap-6">
+                    ${forecastHtml || '<div class="text-center text-gray-500 text-sm py-4">Učitavanje prognoze...</div>'}
+                  </div>
+                </div>
+                 <div class="bg-green-50 dark:bg-green-900/10 rounded-2xl p-6 shadow-sm border border-green-100 dark:border-green-900/30">
+                  <div class="flex items-center gap-2 mb-3">
+                    <span class="material-symbols-outlined text-green-600 dark:text-green-500">agriculture</span>
+                    <h3 class="text-green-800 dark:text-green-500 font-bold uppercase text-xs tracking-wider">Agro Savjet</h3>
+                  </div>
+                  <h4 class="font-bold text-[#111418] dark:text-white mb-2">Priprema tla za sjetvu</h4>
+                  <p class="text-sm text-gray-600 dark:text-gray-400 leading-relaxed mb-3">
+                      Idealni uvjeti za pripremu tla za proljetnu sjetvu kukuruza. Preporuča se zatvaranje brazde.
+                  </p>
+                  <button onclick="navigate('${VIEW_STATE.AGRO}')" class="text-green-700 dark:text-green-400 text-sm font-bold flex items-center gap-1 hover:gap-2 transition-all">
+                    Otvori Agro Kutak <span class="material-symbols-outlined text-sm">arrow_forward</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+            ${state.selectedDay ? renderHourlyModal(state.selectedDay) : ''}
+            ${state.showWarningsModal ? renderWarningsModal() : ''}
+          </div>
+        `;
+      }
+
+      function renderForecastRow(date, day, min, max, icon, gradient, iconClass = 'text-amber-500', precip = 0) {
+        let precipHtml = '';
+        if (precip > 0.1) {
+             precipHtml = `
+            <div class="flex items-center gap-1 mt-0.5">
+                <span class="material-symbols-outlined text-blue-500 text-[14px]" style="font-variation-settings: 'FILL' 1">water_drop</span>
+                <span class="text-xs font-bold text-blue-600 dark:text-blue-400">${precip.toFixed(1)} mm</span>
+            </div>
+             `;
+        }
+
+        return `
+          <div onclick="openHourlyModal('${date}')" class="flex items-center justify-between group cursor-pointer transition-colors rounded-xl p-2 hover:bg-gray-50 dark:hover:bg-gray-800/50">
+            <div class="flex items-center gap-4">
+              <div class="w-10 h-10 rounded-full bg-gray-50 dark:bg-gray-800 flex items-center justify-center group-hover:scale-110 transition-transform">
+                <span class="material-symbols-outlined ${iconClass}">${icon}</span>
+              </div>
+              <div class="flex flex-col">
+                <span class="font-bold text-[#111418] dark:text-white text-sm">${day}</span>
+                ${precipHtml}
+              </div>
+            </div>
+            <div class="flex items-center gap-4 w-1/2 justify-end">
+              <span class="text-gray-400 text-xs font-bold w-6 text-right">${min}°</span>
+              <div class="flex-1 h-1.5 rounded-full bg-gray-100 dark:bg-gray-800 overflow-hidden relative max-w-[80px]">
+                <div class="absolute left-0 h-full bg-gradient-to-r ${gradient} opacity-80" style="width: ${Math.max(10, ((max-min)/20)*100)}%; left: 0%"></div>
+              </div>
+              <span class="font-bold text-[#111418] dark:text-white text-xs w-6">${max}°</span>
+              <span class="material-symbols-outlined text-gray-300">chevron_right</span>
+            </div>
+          </div>
+        `;
+      }
+
+      function renderHourlyModal(date) {
+          const hours = state.hourlyData[date];
+          if (!hours) return '';
+          
+          const dayInfo = state.forecastData.find(f => f.date === date);
+          const dayName = dayInfo ? dayInfo.dayName : date;
+          
+          const activeLoc = getActiveLocation();
+          const locationName = activeLoc.type === 'manual' ? activeLoc.name : (state.nearestStation ? state.nearestStation.naziv : 'Moja Lokacija');
+
+          const rowsHtml = hours.map(h => {
+              // Get Symbol Logic
+              let symCode = h.symbol || 'cloudy';
+              if(symCode.includes('_')) symCode = symCode.split('_')[0];
+              const symbolData = MET_SYMBOLS[symCode] || { icon: 'cloud', class: 'text-gray-400' };
+
+              return `
+                <div class="grid grid-cols-4 items-center p-3 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700/50 border-b border-gray-50 dark:border-gray-800/50 last:border-0">
+                    <div class="text-sm font-bold text-gray-500 dark:text-gray-400">${h.time}</div>
+                    <div class="flex items-center gap-2">
+                        <span class="material-symbols-outlined ${symbolData.class}">${symbolData.icon}</span>
+                        <span class="text-sm font-bold text-[#111418] dark:text-white">${Math.round(h.temp)}°</span>
+                    </div>
+                    <div class="flex items-center justify-center">
+                        ${h.precip > 0 ? `
+                        <div class="flex items-center gap-1 bg-blue-50 dark:bg-blue-900/20 px-2 py-0.5 rounded-full">
+                            <span class="material-symbols-outlined text-blue-500 text-[12px]" style="font-variation-settings: 'FILL' 1">water_drop</span>
+                            <span class="text-xs font-bold text-blue-600 dark:text-blue-400">${h.precip.toFixed(1)}</span>
+                        </div>` : '<span class="text-xs text-gray-300">-</span>'}
+                    </div>
+                    <div class="flex items-center justify-end gap-1 text-xs text-gray-500">
+                        <span class="material-symbols-outlined text-[14px]">air</span>
+                        <span>${Math.round(h.wind)} m/s</span>
+                    </div>
+                </div>
+              `;
+          }).join('');
+
+          return `
+            <div class="fixed inset-0 z-[100] flex items-center justify-center p-4">
+              <div class="absolute inset-0 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200" onclick="closeHourlyModal()"></div>
+              <div class="relative bg-white dark:bg-[#1e2936] w-full max-w-md max-h-[85vh] rounded-2xl shadow-2xl flex flex-col overflow-hidden animate-in zoom-in-95 duration-200 border border-gray-100 dark:border-gray-700">
+                <!-- Header -->
+                <div class="p-4 border-b border-gray-100 dark:border-gray-800 flex justify-between items-center bg-gray-50 dark:bg-[#151f29]">
+                   <div>
+                     <h3 class="font-bold text-lg text-[#111418] dark:text-white">${dayName}</h3>
+                     <p class="text-xs text-gray-500 dark:text-gray-400">Detaljna prognoza po satima</p>
+                   </div>
+                   <button onclick="closeHourlyModal()" class="p-2 rounded-full hover:bg-gray-200 dark:hover:bg-gray-700 transition text-gray-500 dark:text-gray-400">
+                     <span class="material-symbols-outlined">close</span>
+                   </button>
+                </div>
+                
+                <!-- Table Header -->
+                <div class="grid grid-cols-4 px-4 py-2 bg-gray-50/50 dark:bg-[#151f29]/50 text-[10px] font-bold text-gray-400 uppercase tracking-wider border-b border-gray-100 dark:border-gray-800">
+                    <div>Vrijeme</div>
+                    <div>Temp</div>
+                    <div class="text-center">Oborine</div>
+                    <div class="text-right">Vjetar</div>
+                </div>
+
+                <!-- Body (Scrollable) -->
+                <div class="flex-1 overflow-y-auto p-2">
+                   ${rowsHtml}
+                </div>
+
+                <!-- Footer -->
+                <div class="p-4 bg-gray-50 dark:bg-[#151f29] border-t border-gray-100 dark:border-gray-800 text-xs text-gray-500 dark:text-gray-400 flex flex-col gap-1.5">
+                    <div class="flex justify-between items-center">
+                       <span class="flex items-center gap-1"><span class="material-symbols-outlined text-[14px]">location_on</span> Lokacija:</span>
+                       <span class="font-bold text-gray-700 dark:text-gray-300">${locationName}</span>
+                    </div>
+                    <div class="flex justify-between items-center">
+                       <span class="flex items-center gap-1"><span class="material-symbols-outlined text-[14px]">update</span> Ažurirano:</span>
+                       <span class="font-bold text-gray-700 dark:text-gray-300">${state.forecastUpdated || '--:--'}</span>
+                    </div>
+                </div>
+              </div>
+            </div>
+          `;
+      }
+
+      function renderWarningsModal() {
+          const warnings = state.warnings[state.warningTab] || [];
+          
+          const warningList = warnings.length > 0 ? warnings.map(w => {
+             const start = formatWarningTime(w.onset);
+             const end = formatWarningTime(w.expires);
+
+             return `
+             <div class="${w.bg} border ${w.border} p-4 rounded-xl mb-3 last:mb-0 shadow-sm">
+                <div class="flex items-center gap-3 mb-3">
+                    <span class="material-symbols-outlined ${w.text} text-3xl">${w.icon}</span>
+                    <div>
+                        <h4 class="font-bold ${w.text} text-lg leading-tight">${w.headline || w.event}</h4>
+                        <span class="text-xs font-bold uppercase tracking-wide opacity-80 ${w.text}">${w.severity === 'Moderate' ? 'Umjereno' : w.severity === 'Severe' ? 'Opasno' : w.severity === 'Extreme' ? 'Izuzetno opasno' : w.severity}</span>
+                    </div>
+                </div>
+                <p class="text-sm ${w.text} mb-4 leading-relaxed opacity-90">${w.description}</p>
+                
+                <!-- Graphic Time Display -->
+                <div class="flex items-center justify-between bg-white/60 dark:bg-black/20 rounded-lg p-3 border ${w.border} border-opacity-50">
+                   <div class="flex flex-col text-${w.color}-900 dark:text-${w.color}-100">
+                      <span class="text-[10px] font-bold uppercase opacity-60">Početak</span>
+                      <span class="text-xl font-bold leading-none my-0.5">${start.time}</span>
+                      <span class="text-[10px] font-medium opacity-80 uppercase tracking-wide">${start.date}</span>
+                   </div>
+                   
+                   <div class="flex-1 mx-4 flex items-center relative">
+                      <div class="w-full h-0.5 bg-current opacity-30 rounded-full"></div>
+                      <div class="absolute right-0 -top-2 text-current opacity-50 text-xs">▼</div>
+                   </div>
+
+                   <div class="flex flex-col items-end text-right text-${w.color}-900 dark:text-${w.color}-100">
+                      <span class="text-[10px] font-bold uppercase opacity-60">Kraj</span>
+                      <span class="text-xl font-bold leading-none my-0.5">${end.time}</span>
+                      <span class="text-[10px] font-medium opacity-80 uppercase tracking-wide">${end.date}</span>
+                   </div>
+                </div>
+             </div>
+          `}).join('') : `
+             <div class="flex flex-col items-center justify-center p-8 text-center text-gray-500 dark:text-gray-400">
+                <span class="material-symbols-outlined text-4xl mb-2 text-green-500">check_circle</span>
+                <p>Nema aktivnih upozorenja za odabrani period.</p>
+             </div>
+          `;
+
+          const tabs = [
+              { id: 'today', label: 'Danas' },
+              { id: 'tomorrow', label: 'Sutra' },
+              { id: 'dayAfter', label: 'Prekosutra' }
+          ];
+
+          return `
+             <div class="fixed inset-0 z-[100] flex items-center justify-center p-4">
+              <div class="absolute inset-0 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200" onclick="closeWarningsModal()"></div>
+              <div class="relative bg-white dark:bg-[#1e2936] w-full max-w-md max-h-[85vh] rounded-2xl shadow-2xl flex flex-col overflow-hidden animate-in zoom-in-95 duration-200 border border-gray-100 dark:border-gray-700">
+                <!-- Header -->
+                <div class="p-4 border-b border-gray-100 dark:border-gray-800 flex justify-between items-center bg-gray-50 dark:bg-[#151f29]">
+                   <div class="flex items-center gap-2">
+                     <span class="material-symbols-outlined text-amber-500">warning</span>
+                     <div>
+                        <h3 class="font-bold text-lg text-[#111418] dark:text-white">Meteoalarm</h3>
+                        <p class="text-xs text-gray-500 dark:text-gray-400">Zagrebačka regija</p>
+                     </div>
+                   </div>
+                   <button onclick="closeWarningsModal()" class="p-2 rounded-full hover:bg-gray-200 dark:hover:bg-gray-700 transition text-gray-500 dark:text-gray-400">
+                     <span class="material-symbols-outlined">close</span>
+                   </button>
+                </div>
+
+                <!-- Tabs -->
+                <div class="flex p-2 gap-2 border-b border-gray-100 dark:border-gray-800">
+                   ${tabs.map(t => `
+                      <button onclick="switchWarningTab('${t.id}')" class="flex-1 py-2 rounded-lg text-sm font-bold transition ${state.warningTab === t.id ? 'bg-primary text-white shadow-md' : 'text-gray-500 hover:bg-gray-50 dark:hover:bg-gray-800'}">
+                        ${t.label}
+                      </button>
+                   `).join('')}
+                </div>
+                
+                <!-- Body (Scrollable) -->
+                <div class="flex-1 overflow-y-auto p-4 flex flex-col gap-4">
+                   ${warningList}
+                </div>
+
+                <!-- Footer -->
+                <div class="p-4 bg-gray-50 dark:bg-[#151f29] border-t border-gray-100 dark:border-gray-800 text-xs text-gray-500 dark:text-gray-400 flex justify-between items-center">
+                    <span>Izvor podataka:</span>
+                    <a href="https://meteo.hr" target="_blank" class="font-bold text-primary hover:underline">meteo.hr (DHMZ)</a>
+                </div>
+              </div>
+            </div>
+          `;
+      }
+
+      function renderRadar() {
+        return `
+          <div class="fade-in flex-1 relative w-full h-[calc(100vh-80px)] md:h-screen bg-gray-100 overflow-hidden ml-0 md:ml-64">
+             <!-- Radar Map Container -->
+            <div id="map-radar" class="absolute inset-0 z-0"></div>
+            
+            <!-- Controls Overlay -->
+            <div class="absolute top-4 right-4 flex flex-col gap-2 z-10">
+              <button class="bg-white/90 dark:bg-surface-dark/90 backdrop-blur-md w-10 h-10 rounded-lg shadow-lg flex items-center justify-center text-[#111418] dark:text-white hover:bg-gray-50 dark:hover:bg-gray-800 transition">
+                <span class="material-symbols-outlined">layers</span>
+              </button>
+            </div>
+
+            <!-- Legend (Top Left) -->
+            <div class="absolute top-4 left-4 z-10 bg-white/90 dark:bg-[#1e2936]/90 backdrop-blur-sm p-3 rounded-lg shadow-md border border-gray-100 dark:border-gray-700 w-40">
+              <div class="flex justify-between items-center mb-1">
+                <span class="text-[10px] uppercase font-bold text-gray-500 dark:text-gray-400">Intenzitet (mm/h)</span>
+              </div>
+              <div class="h-2 w-full rounded-full bg-gradient-to-r from-blue-300 via-green-400 via-yellow-400 to-red-600"></div>
+              <div class="flex justify-between text-[9px] text-gray-500 dark:text-gray-400 mt-1 font-medium">
+                <span>0</span>
+                <span>5</span>
+                <span>10</span>
+                <span>30+</span>
+              </div>
+            </div>
+
+            <!-- Player Bar -->
+            <div class="absolute bottom-24 md:bottom-8 left-4 right-4 md:left-8 md:right-8 z-[500]">
+               <div class="bg-white/95 dark:bg-surface-dark/95 backdrop-blur-xl p-4 md:p-6 rounded-2xl shadow-xl border border-gray-100 dark:border-gray-700 max-w-3xl mx-auto">
+                  <div class="flex justify-between items-center mb-4">
+                    <div class="flex items-center gap-2">
+                      <span class="relative flex h-3 w-3">
+                        <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
+                        <span class="relative inline-flex rounded-full h-3 w-3 bg-red-500"></span>
+                      </span>
+                      <span class="text-xs font-bold text-[#111418] dark:text-white tracking-widest uppercase">Radar Uživo</span>
+                    </div>
+                    <span id="radar-time-display" class="text-xs font-mono font-bold text-primary bg-blue-50 dark:bg-blue-900/30 px-3 py-1 rounded-md">
+                      --:--
+                    </span>
+                  </div>
+                  
+                  <div class="flex items-center gap-4 md:gap-6">
+                    <button id="radar-play-btn" onclick="toggleRadar()" class="flex-none flex items-center justify-center w-14 h-14 rounded-full bg-primary text-white shadow-lg hover:scale-105 transition-transform active:scale-95">
+                      <span class="material-symbols-outlined text-3xl fill-1">${state.radarPlaying ? 'pause' : 'play_arrow'}</span>
+                    </button>
+                    <div class="flex-1 flex flex-col gap-2">
+                      <input id="radar-slider" type="range" class="w-full h-2 bg-gray-200 dark:bg-gray-700 rounded-full appearance-none cursor-pointer accent-primary" min="0" max="6" value="6" oninput="onRadarSliderChange(this.value)">
+                      <div class="flex justify-between text-[10px] font-bold text-gray-400 uppercase tracking-wider">
+                        <span>-1h</span>
+                        <span>-30m</span>
+                        <span>Sada</span>
+                      </div>
+                    </div>
+                  </div>
+               </div>
+            </div>
+          </div>
+        `;
+      }
+
+      function renderSettings() {
+        const locationsList = state.locations.map((loc, index) => {
+            const isActive = index === state.activeLocationIndex;
+            const isGps = loc.type === 'gps';
+            
+            return `
+              <div class="flex items-center justify-between p-4 rounded-xl border transition-all cursor-pointer ${isActive ? 'bg-blue-50 dark:bg-blue-900/20 border-blue-200 dark:border-blue-800 shadow-sm' : 'bg-white dark:bg-[#1e2936] border-gray-100 dark:border-gray-800 hover:border-blue-200 dark:hover:border-blue-800'}" 
+                   onclick="setActiveLocation(${index})">
+                <div class="flex items-center gap-3">
+                   <div class="w-10 h-10 rounded-full flex items-center justify-center ${isActive ? 'bg-blue-100 dark:bg-blue-800 text-primary dark:text-white' : 'bg-gray-50 dark:bg-gray-800 text-gray-400'}">
+                      <span class="material-symbols-outlined">${isGps ? 'my_location' : 'location_city'}</span>
+                   </div>
+                   <div>
+                      <h4 class="font-bold text-sm text-[#111418] dark:text-white">${loc.name}</h4>
+                      <p class="text-xs text-gray-500 dark:text-gray-400">${isGps ? 'Automatska lokacija' : 'Ručno dodano'}</p>
+                   </div>
+                </div>
+                <div class="flex items-center gap-2">
+                   ${isActive ? '<span class="material-symbols-outlined text-primary">check_circle</span>' : ''}
+                   ${!isGps ? `<button onclick="event.stopPropagation(); removeLocation(${index})" class="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-full transition"><span class="material-symbols-outlined text-lg">delete</span></button>` : ''}
+                </div>
+              </div>
+            `;
+        }).join('');
+
+        const searchResultsHtml = state.searchResults.map(res => `
+            <div onclick="addLocation({name: '${res.name}', lat: ${res.lat}, lon: ${res.lon}})" class="flex items-center gap-3 p-3 hover:bg-gray-50 dark:hover:bg-gray-800 cursor-pointer border-b border-gray-100 dark:border-gray-800 last:border-0">
+                <span class="material-symbols-outlined text-gray-400">location_on</span>
+                <div class="flex flex-col">
+                    <span class="font-bold text-sm text-[#111418] dark:text-white">${res.name}</span>
+                    <span class="text-xs text-gray-400 line-clamp-1">${res.fullName}</span>
+                </div>
+            </div>
+        `).join('');
+
+        return `
+          <div class="fade-in flex flex-col gap-6 p-4 md:p-8 max-w-2xl mx-auto md:ml-64 w-full">
+            <div class="flex items-center gap-3 mb-2">
+               <div class="w-12 h-12 rounded-full bg-gray-100 dark:bg-gray-800 flex items-center justify-center">
+                 <span class="material-symbols-outlined text-2xl text-gray-600 dark:text-gray-300">settings</span>
+               </div>
+               <div>
+                 <h1 class="text-2xl font-bold text-[#111418] dark:text-white">Postavke</h1>
+                 <p class="text-sm text-gray-500 dark:text-gray-400">Upravljanje lokacijama</p>
+               </div>
+            </div>
+
+            <!-- Locations List -->
+            <div class="flex flex-col gap-4">
+               <h3 class="font-bold text-sm uppercase text-gray-500 dark:text-gray-400 tracking-wider">Moje Lokacije</h3>
+               <div class="flex flex-col gap-3">
+                 ${locationsList}
+               </div>
+               
+               <!-- Add GPS Button if missing -->
+               ${!state.locations.find(l => l.type === 'gps') ? `
+                 <button onclick="addGpsLocation()" class="flex items-center justify-center gap-2 w-full p-3 rounded-xl border border-dashed border-primary/50 text-primary font-bold hover:bg-blue-50 dark:hover:bg-blue-900/20 transition">
+                    <span class="material-symbols-outlined">my_location</span> Dodaj "Moju lokaciju" (GPS)
+                 </button>
+               ` : ''}
+            </div>
+
+            <!-- Add New Location -->
+            <div class="flex flex-col gap-4 pt-4 border-t border-gray-200 dark:border-gray-800">
+               <h3 class="font-bold text-sm uppercase text-gray-500 dark:text-gray-400 tracking-wider">Dodaj Novo Mjesto</h3>
+               <div class="relative">
+                  <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                     <span class="material-symbols-outlined text-gray-400">search</span>
+                  </div>
+                  <input type="text" 
+                         value="${state.searchQuery}"
+                         oninput="handleSearchInput(event)"
+                         placeholder="Pretraži gradove (npr. Zagreb, Split)..." 
+                         class="w-full pl-10 pr-4 py-3 bg-white dark:bg-[#1e2936] border border-gray-200 dark:border-gray-700 rounded-xl focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent text-[#111418] dark:text-white shadow-sm transition" />
+                  
+                  ${state.isSearching ? `
+                     <div class="absolute inset-y-0 right-0 pr-3 flex items-center">
+                        <span class="material-symbols-outlined animate-spin text-primary">progress_activity</span>
+                     </div>
+                  ` : ''}
+                  
+                  <!-- Dropdown Results -->
+                  ${state.searchResults.length > 0 ? `
+                      <div class="absolute top-full mt-2 w-full bg-white dark:bg-[#1e2936] rounded-xl shadow-xl border border-gray-100 dark:border-gray-700 overflow-hidden z-50">
+                         ${searchResultsHtml}
+                      </div>
+                  ` : ''}
+               </div>
+               <p class="text-xs text-gray-400">Koristi se OpenStreetMap baza podataka.</p>
+            </div>
+          </div>
+        `;
+      }
+
+      // --- Main Render Function ---
+
+      function render() {
+        // Cleanup existing map if leaving home
+        if (state.activeTab !== VIEW_STATE.HOME && mapInstance && document.getElementById('map-home')) {
+             mapInstance.remove();
+             mapInstance = null;
+        }
+
+        // Clear logic specific to route
+        app.innerHTML = '';
+        
+        // 1. Static Layout (Nav/Sidebar)
+        app.insertAdjacentHTML('beforeend', renderNav());
+
+        // 2. Main Content Wrapper
+        let contentHtml = '';
+        if (state.activeTab !== VIEW_STATE.RADAR && state.activeTab !== VIEW_STATE.SETTINGS) {
+           contentHtml += renderHeader();
+        }
+
+        switch (state.activeTab) {
+          case VIEW_STATE.HOME:
+            contentHtml += renderHome();
+            break;
+          case VIEW_STATE.RADAR:
+            contentHtml += renderRadar();
+            break;
+          case VIEW_STATE.AGRO:
+            contentHtml += renderAgro();
+            break;
+          case VIEW_STATE.SETTINGS:
+            contentHtml += renderSettings();
+            break;
+        }
+
+        const mainContainer = document.createElement('div');
+        mainContainer.className = "flex-1 w-full bg-background-light dark:bg-background-dark min-h-screen";
+        mainContainer.innerHTML = contentHtml;
+        app.appendChild(mainContainer);
+
+        // Post-render: Init Map if needed
+        if (state.activeTab === VIEW_STATE.HOME) {
+            setTimeout(initMap, 50);
+        } else if (state.activeTab === VIEW_STATE.RADAR) {
+            setTimeout(initRadarMap, 50);
+        }
+      }
+
+      // --- Init ---
+      
+      function init() {
+        loadLocations();
+        getUserLocation();
+
+        // Initial Fetch
+        fetchWeatherData();
+        fetchWarnings();
+        
+        // Polling
+        setInterval(fetchWeatherData, 10 * 60 * 1000); // Every 10 mins
+        setInterval(fetchWarnings, 30 * 60 * 1000); // Every 30 mins
+
+        // Initial Render
+        render();
+      }
+
+      // Start
+      init();
+
+    </script>
+  <script type="module" src="/index.tsx"></script>
+</body>
+</html>
