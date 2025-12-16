@@ -132,7 +132,7 @@
         nearestStation: null,
         
         // Locations Management
-        locations: [], // Array of { id, name, type: 'gps'|'manual', lat, lon }
+        locations: [], 
         activeLocationIndex: 0,
         
         // UI Search State
@@ -140,13 +140,24 @@
         searchResults: [],
         isSearching: false,
 
-        forecastData: [], // Array of daily forecasts
-        hourlyData: {}, // Object map: date -> array of hourly objects
-        selectedDay: null, // Date string for modal
-        forecastUpdated: null, // Timestamp of last forecast fetch
-        isForecastExpanded: false, // 3 vs 7 days toggle
+        forecastData: [], 
+        hourlyData: {}, 
+        selectedDay: null, 
+        forecastUpdated: null, 
+        isForecastExpanded: false, 
+        
         agroData: [],
         isAgroLoading: false,
+        
+        // Meteo.hr Agro Data
+        agroMeteo: {
+          stanje: null,
+          forecast: null, // p_ssz
+          forecastPeriod: null, // interval_prognoze
+          outlook: null, // unutrasnjost
+          outlookPeriod: null // interval_izgleda
+        },
+
         isLoading: false,
         lastUpdated: null,
         radarPlaying: false,
@@ -156,7 +167,7 @@
         // Warnings
         warnings: { today: [], tomorrow: [], dayAfter: [] },
         showWarningsModal: false,
-        warningTab: 'today' // today, tomorrow, dayAfter
+        warningTab: 'today' 
       };
 
       let mapInstance = null;
@@ -212,10 +223,8 @@
           if (storedLocs) {
               state.locations = JSON.parse(storedLocs);
               state.activeLocationIndex = storedIndex ? parseInt(storedIndex) : 0;
-              // Validate index
               if (state.activeLocationIndex >= state.locations.length) state.activeLocationIndex = 0;
           } else {
-              // Default
               state.locations = [{ id: 'gps', name: 'Moja Lokacija (GPS)', type: 'gps', lat: 46.16, lon: 16.83 }];
               state.activeLocationIndex = 0;
           }
@@ -245,8 +254,6 @@
 
       async function fetchForecastData() {
          const activeLoc = getActiveLocation();
-         
-         // If GPS is active but lat/lon not yet set, wait or use default
          const lat = activeLoc.lat || 46.16;
          const lon = activeLoc.lon || 16.83;
 
@@ -270,25 +277,22 @@
 
           data.properties.timeseries.forEach(point => {
               const date = point.time.split('T')[0];
-              const time = point.time.split('T')[1].substring(0, 5); // HH:MM
+              const time = point.time.split('T')[1].substring(0, 5); 
               
               if (!dailyGroups[date]) {
                   dailyGroups[date] = {
                       temps: [],
                       symbols: [],
                       precipTotal: 0,
-                      hours: [] // Store hourly details
+                      hours: [] 
                   };
               }
-              // Temp
               const temp = point.data.instant.details.air_temperature;
               dailyGroups[date].temps.push(temp);
               
-              // Precipitation
               const precip = point.data.next_1_hours?.details?.precipitation_amount || point.data.next_6_hours?.details?.precipitation_amount || 0;
               dailyGroups[date].precipTotal += precip;
 
-              // Symbol
               const next12 = point.data.next_12_hours?.summary?.symbol_code;
               const next6 = point.data.next_6_hours?.summary?.symbol_code;
               const next1 = point.data.next_1_hours?.summary?.symbol_code;
@@ -298,7 +302,6 @@
               else if (next6) dailyGroups[date].symbols.push(next6);
               else if (next1) dailyGroups[date].symbols.push(next1);
 
-              // Add to hourly list
               dailyGroups[date].hours.push({
                   time: time,
                   temp: temp,
@@ -308,23 +311,19 @@
               });
           });
 
-          // Convert to array
           const today = new Date().toISOString().split('T')[0];
-          state.hourlyData = {}; // Reset hourly map
+          state.hourlyData = {};
 
           const forecastList = Object.keys(dailyGroups).sort().map(date => {
                const dayData = dailyGroups[date];
                const min = Math.min(...dayData.temps);
                const max = Math.max(...dayData.temps);
                
-               // Store hours in state
                state.hourlyData[date] = dayData.hours;
 
-               // Pick most frequent symbol
                let symbolCode = dayData.symbols[Math.floor(dayData.symbols.length / 2)] || 'cloudy';
                let cleanSymbol = symbolCode.split('_')[0]; 
                
-               // Format Date
                const d = new Date(date);
                const dayName = date === today ? 'Danas' : d.toLocaleDateString('hr-HR', { weekday: 'long' });
                const formattedDay = dayName.charAt(0).toUpperCase() + dayName.slice(1);
@@ -346,9 +345,82 @@
           if (state.activeTab === VIEW_STATE.HOME) render();
       }
 
-      async function fetchAgroData() {
-        if (state.agroData.length > 0) return; 
+      async function fetchAgroMeteoHr() {
+        const proxyUrl = 'https://corsproxy.io/?';
+        const urlXml = 'https://klima.hr/agro_bilten.xml';
 
+        try {
+            const res = await fetch(proxyUrl + encodeURIComponent(urlXml));
+            if (!res.ok) throw new Error("Failed to fetch Agro XML");
+            
+            const text = await res.text();
+            const parser = new DOMParser();
+            const xmlDoc = parser.parseFromString(text, 'text/xml');
+
+            // 1. Forecast Period (<interval_prognoze>)
+            let forecastPeriod = "Agro Prognoza";
+            const prognozaNode = xmlDoc.querySelector('prognoza');
+            
+            if (prognozaNode) {
+                const interval = prognozaNode.querySelector('interval_prognoze');
+                if (interval) forecastPeriod = interval.textContent.trim();
+            } else {
+                // Fallback
+                const interval = xmlDoc.querySelector('interval_prognoze');
+                if (interval) forecastPeriod = interval.textContent.trim();
+            }
+
+            // 2. Stanje (<stanje>)
+            const stanjeNode = xmlDoc.querySelector('stanje');
+            let stanje = stanjeNode ? stanjeNode.textContent.trim() : null;
+
+            // 3. Prognoza p_ssz (<p_ssz>) inside <prognoza>
+            let forecast = null;
+            if (prognozaNode) {
+                 const pssz = prognozaNode.querySelector('p_ssz');
+                 if (pssz) forecast = pssz.textContent.trim();
+            }
+            if (!forecast) {
+                const pssz = xmlDoc.querySelector('p_ssz');
+                if (pssz) forecast = pssz.textContent.trim();
+            }
+
+            // 4. Izgledi (<izgledi><unutrasnjost>)
+            let outlook = null;
+            let outlookPeriod = null;
+            const izglediNode = xmlDoc.querySelector('izgledi');
+            
+            if (izglediNode) {
+                 const intIzgleda = izglediNode.querySelector('interval_izgleda');
+                 if (intIzgleda) outlookPeriod = intIzgleda.textContent.trim();
+                 
+                 const unutrasnjost = izglediNode.querySelector('unutrasnjost');
+                 if (unutrasnjost) outlook = unutrasnjost.textContent.trim();
+            } else {
+                 // Fallback if structure is different
+                 const unutrasnjost = xmlDoc.querySelector('unutrasnjost');
+                 if (unutrasnjost) outlook = unutrasnjost.textContent.trim();
+                 
+                 const intIzgleda = xmlDoc.querySelector('interval_izgleda');
+                 if (intIzgleda) outlookPeriod = intIzgleda.textContent.trim();
+            }
+
+            state.agroMeteo = { 
+                stanje, 
+                forecast, 
+                forecastPeriod, 
+                outlook,
+                outlookPeriod
+            };
+            
+            if (state.activeTab === VIEW_STATE.HOME || state.activeTab === VIEW_STATE.AGRO) render();
+
+        } catch (e) {
+            console.error("Agro Meteo XML fetch failed", e);
+        }
+      }
+
+      async function fetchAgroData() {
         state.isAgroLoading = true;
         render(); 
 
@@ -356,38 +428,78 @@
         const proxyUrl = 'https://corsproxy.io/?' + encodeURIComponent(targetUrl);
 
         try {
+          // 1. Dohvati Glavnu Listu
           const res = await fetch(proxyUrl);
+          if (!res.ok) throw new Error("Proxy error");
+          
           const text = await res.text();
           const parser = new DOMParser();
           const doc = parser.parseFromString(text, 'text/html');
           
-          const articles = Array.from(doc.querySelectorAll('article, .post, .news-item, .entry')).slice(0, 10);
+          // 2. Pronađi linkove u h3.pt-cv-title (LIMIT 10)
+          const titleLinks = Array.from(doc.querySelectorAll('h3.pt-cv-title a')).slice(0, 10);
+
+          // Fallback ako selektor ne radi
+          if (titleLinks.length === 0) {
+             const fallbackLinks = Array.from(doc.querySelectorAll('.entry-title a')).slice(0, 10);
+             if(fallbackLinks.length > 0) titleLinks.push(...fallbackLinks);
+          }
           
-          state.agroData = articles.map((el, index) => {
-            const titleEl = el.querySelector('h1, h2, h3, h4, .entry-title a, .post-title a');
-            const dateEl = el.querySelector('time, .date, .post-date, .entry-date');
-            const summaryEl = el.querySelector('p, .entry-summary, .post-excerpt');
-            const linkEl = el.querySelector('a');
+          // 3. Dohvati detalje za svaki članak paralelno
+          const articles = await Promise.all(titleLinks.map(async (linkEl, index) => {
+             const title = linkEl.textContent.trim();
+             let href = linkEl.getAttribute('href');
+             if (!href.startsWith('http')) href = `https://savjetodavna.mps.hr${href}`;
 
-            const title = titleEl ? titleEl.textContent.trim() : 'Savjet bez naslova';
-            const rawDate = dateEl ? dateEl.textContent.trim() : '';
-            const summary = summaryEl ? summaryEl.textContent.trim() : 'Kliknite za više detalja...';
-            const link = linkEl ? linkEl.href : targetUrl;
-            const finalLink = link.startsWith('http') ? link : `https://savjetodavna.mps.hr${link}`;
-            const category = categorizeTitle(title);
+             // Default vrijednosti
+             const category = categorizeTitle(title);
+             let summary = 'Učitavanje sadržaja preporuke...';
+             let date = 'Nedavno';
 
-            return {
-              id: index,
-              category: category.name,
-              title: title,
-              summary: summary,
-              date: rawDate || 'Nedavno',
-              icon: category.icon,
-              color: category.color,
-              bg: category.bg,
-              link: finalLink
-            };
-          }).filter(item => item.title !== 'Savjet bez naslova');
+             try {
+                // Dohvati pojedinačnu stranicu vijesti
+                const detailRes = await fetch('https://corsproxy.io/?' + encodeURIComponent(href));
+                const detailText = await detailRes.text();
+                const detailDoc = parser.parseFromString(detailText, 'text/html');
+
+                // Pronađi glavni tekst (.entry-content je standard za WP)
+                const contentEl = detailDoc.querySelector('.entry-content') || detailDoc.querySelector('.post-content') || detailDoc.querySelector('article');
+                
+                if (contentEl) {
+                    // Očisti skripte i stilove
+                    const scripts = contentEl.querySelectorAll('script, style');
+                    scripts.forEach(s => s.remove());
+
+                    // Uzmi čisti tekst, prvih 300 znakova
+                    const cleanText = contentEl.innerText || contentEl.textContent;
+                    summary = cleanText.replace(/\s+/g, ' ').trim().substring(0, 300) + '...';
+                }
+
+                // Pronađi datum
+                const dateEl = detailDoc.querySelector('time') || detailDoc.querySelector('.entry-date');
+                if (dateEl) date = dateEl.textContent.trim();
+
+             } catch (err) {
+                console.warn("Nije moguće dohvatiti detalje za", href);
+             }
+
+             return {
+                id: index,
+                category: category.name,
+                title: title,
+                summary: summary,
+                date: date,
+                icon: category.icon,
+                color: category.color,
+                bg: category.bg,
+                link: href
+             };
+          }));
+
+          state.agroData = articles.filter(a => a !== null);
+          
+          // Ako smo na Home tabu, ponovno renderiraj
+          if (state.activeTab === VIEW_STATE.HOME) render();
 
         } catch (e) {
           console.error("Agro fetch failed", e);
@@ -553,13 +665,10 @@
           const xmlDoc = parser.parseFromString(xmlString, "text/xml");
           const infos = Array.from(xmlDoc.querySelectorAll('info'));
           
-          // Filter for Zagreb Region AND Croatian language (hr-HR)
           const zagrebInfos = infos.filter(info => {
-              // 1. Language Filter
               const lang = info.querySelector('language')?.textContent || '';
               if (!lang.toLowerCase().includes('hr')) return false;
 
-              // 2. Area Filter
               const areaDesc = info.querySelector('areaDesc')?.textContent || '';
               return areaDesc.includes('Zagrebačka regija');
           });
@@ -572,8 +681,6 @@
               const onset = info.querySelector('onset')?.textContent || '';
               const expires = info.querySelector('expires')?.textContent || '';
 
-              // Map Severity to Color/Class
-              // CAP: Extreme, Severe, Moderate, Minor, Unknown
               let color = 'gray';
               let bg = 'bg-gray-100';
               let text = 'text-gray-800';
@@ -594,7 +701,6 @@
                   bg = 'bg-green-50 dark:bg-green-900/30'; text = 'text-green-800 dark:text-green-300'; border = 'border-green-200 dark:border-green-800';
               }
 
-              // Map Event to Icon
               let icon = 'warning';
               const ev = event.toLowerCase();
               if (ev.includes('wind') || ev.includes('vjetar')) icon = 'air';
@@ -606,7 +712,7 @@
               else if (ev.includes('cold') || ev.includes('hladn')) icon = 'severe_cold';
 
               return { severity, event, headline, description, onset, expires, color, bg, text, border, icon, level };
-          }).sort((a, b) => b.level - a.level); // Sort by severity (highest first)
+          }).sort((a, b) => b.level - a.level); 
       }
 
       function openWarningsModal(tab = 'today') {
@@ -632,17 +738,15 @@
       function getUserLocation() {
           const activeLoc = getActiveLocation();
           
-          // Only fetch geolocation if current active location is type 'gps'
           if (activeLoc.type === 'gps' && navigator.geolocation) {
               navigator.geolocation.getCurrentPosition(
                   (position) => {
-                      // Update the GPS location in state
                       state.locations[state.activeLocationIndex].lat = position.coords.latitude;
                       state.locations[state.activeLocationIndex].lon = position.coords.longitude;
                       saveLocations();
                       
                       findNearestStation();
-                      fetchForecastData(); // Fetch forecast for new location
+                      fetchForecastData(); 
                       if (state.activeTab === VIEW_STATE.HOME) {
                           updateDashboard();
                           updateMapMarkers(); 
@@ -697,7 +801,6 @@
               if (el) el.textContent = val;
           };
 
-          // If manual location, show its name, else show nearest station or "Moja Lokacija"
           const displayCity = activeLoc.type === 'manual' ? activeLoc.name : s.naziv;
 
           setTxt('hero-city', displayCity);
@@ -772,26 +875,24 @@
               lon: place.lon
           };
           state.locations.push(newLoc);
-          state.activeLocationIndex = state.locations.length - 1; // Auto select new
+          state.activeLocationIndex = state.locations.length - 1; 
           state.searchQuery = '';
           state.searchResults = [];
           saveLocations();
           render();
           
-          // Refresh data for new location
           findNearestStation();
           fetchForecastData();
       }
 
       function addGpsLocation() {
-          // Check if GPS already exists
           const exists = state.locations.find(l => l.type === 'gps');
           if (!exists) {
               state.locations.unshift({
                   id: 'gps',
                   name: 'Moja Lokacija (GPS)',
                   type: 'gps',
-                  lat: null, // Will be filled by geolocation
+                  lat: null, 
                   lon: null
               });
               state.activeLocationIndex = 0;
@@ -802,7 +903,7 @@
       }
 
       function removeLocation(index) {
-          if (state.locations[index].type === 'gps') return; // Prevent removing GPS if logic requires it, but UI handles it
+          if (state.locations[index].type === 'gps') return;
           
           state.locations.splice(index, 1);
           if (state.activeLocationIndex >= index && state.activeLocationIndex > 0) {
@@ -810,16 +911,14 @@
           }
           saveLocations();
           render();
-          
-          // Refresh
-          getUserLocation(); // Trigger refresh based on new active
+          getUserLocation(); 
       }
 
       function setActiveLocation(index) {
           state.activeLocationIndex = index;
           saveLocations();
           render();
-          getUserLocation(); // Trigger refresh
+          getUserLocation(); 
       }
 
       // --- Map Logic (Home) ---
@@ -934,7 +1033,6 @@
               }
           });
 
-          // Draw Selected Location (User or Manual)
           const activeLoc = getActiveLocation();
           if (activeLoc.lat && activeLoc.lon) {
                const userIcon = L.divIcon({
@@ -964,12 +1062,19 @@
         mapInstance = L.map('map-radar', {
            zoomControl: false, 
            attributionControl: false,
-           maxZoom: 12 
-        }).setView([lat, lon], 8);
+           dragging: true,
+           scrollWheelZoom: false,
+           doubleClickZoom: false,
+           touchZoom: false,
+           boxZoom: false,
+           keyboard: false
+        }).setView([lat, lon], 9);
 
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
             attribution: 'OSM',
-            maxZoom: 12
+            opacity: 0.6, 
+            minZoom: 9,
+            maxZoom: 9 
         }).addTo(mapInstance);
 
         const ProxyWMS = L.TileLayer.WMS.extend({
@@ -1014,22 +1119,18 @@
         state.currentRadarIndex = state.radarFrames.length - 1;
         updateRadarFrame();
         
-        const cities = [
-            {name: "Koprivnica", lat: 46.16, lon: 16.83},
-            {name: "Đurđevac", lat: 46.04, lon: 17.07},
-            {name: "Križevci", lat: 46.02, lon: 16.54}
-        ];
-        cities.forEach(city => {
-            L.marker([city.lat, city.lon], {
-                icon: L.divIcon({
-                    className: 'bg-transparent',
-                    html: `<div class="flex flex-col items-center">
-                             <div class="w-2.5 h-2.5 bg-gray-800 rounded-full shadow-md border-2 border-white"></div>
-                             <span class="text-[11px] font-bold text-gray-800 drop-shadow-sm mt-0.5 bg-white/60 px-1 rounded">${city.name}</span>
-                           </div>`
-                })
-            }).addTo(mapInstance);
-        });
+        if (activeLoc.lat && activeLoc.lon) {
+             const userIcon = L.divIcon({
+                   className: 'custom-div-icon',
+                   html: `<div class="relative flex h-4 w-4">
+                            <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75"></span>
+                            <span class="relative inline-flex rounded-full h-4 w-4 bg-blue-500 border-2 border-white shadow-md"></span>
+                          </div>`,
+                   iconSize: [16, 16],
+                   iconAnchor: [8, 8]
+               });
+               L.marker([activeLoc.lat, activeLoc.lon], { icon: userIcon, zIndexOffset: 1000 }).addTo(mapInstance);
+        }
 
         setTimeout(() => { mapInstance.invalidateSize(); }, 200);
       }
@@ -1082,6 +1183,7 @@
         
         if (view === VIEW_STATE.AGRO) {
           fetchAgroData();
+          fetchAgroMeteoHr(); // Ensure data is fresh when navigating
         }
       }
 
@@ -1140,6 +1242,10 @@
                  <span class="w-1.5 h-1.5 rounded-full bg-red-500"></span>
                  <span class="text-xs font-bold dark:text-gray-300">meteo.hr (Meteoalarm)</span>
                </div>
+               <div class="flex items-center gap-2 mt-1">
+                 <span class="w-1.5 h-1.5 rounded-full bg-orange-500"></span>
+                 <span class="text-xs font-bold dark:text-gray-300">savjetodavna.mps.hr</span>
+               </div>
             </div>
           </div>
         `;
@@ -1172,7 +1278,6 @@
         const activeLoc = getActiveLocation();
         const city = activeLoc.type === 'manual' ? activeLoc.name : s.naziv || 'Učitavanje...';
 
-        // Forecast Generation
         const displayForecast = state.isForecastExpanded ? state.forecastData : state.forecastData.slice(0, 3);
         const forecastHtml = displayForecast.map(f => {
             const symbolData = MET_SYMBOLS[f.symbol] || { icon: 'cloud', class: 'text-gray-400' };
@@ -1181,7 +1286,6 @@
             return renderForecastRow(f.date, f.dayName, f.min, f.max, symbolData.icon, gradient, symbolData.class, f.precip);
         }).join('');
 
-        // Warning Logic for Dashboard Card
         let activeWarning = null;
         let warningLabel = "Nema Upozorenja";
         let warningDesc = "Nisu izdana upozorenja za Zagrebačku regiju.";
@@ -1189,7 +1293,7 @@
         let warningIcon = "check_circle";
         
         if (state.warnings.today && state.warnings.today.length > 0) {
-            activeWarning = state.warnings.today[0]; // Most severe
+            activeWarning = state.warnings.today[0]; 
             warningLabel = "Upozorenje za danas";
         } else if (state.warnings.tomorrow && state.warnings.tomorrow.length > 0) {
             activeWarning = state.warnings.tomorrow[0];
@@ -1197,11 +1301,9 @@
         }
 
         if (activeWarning) {
-            // Translate fallback severity if needed
             const sevMap = { 'Moderate': 'Umjereno', 'Severe': 'Opasno', 'Extreme': 'Izuzetno opasno' };
             const translatedSev = sevMap[activeWarning.severity] || activeWarning.severity;
 
-            // Prioritize headline if available, otherwise construct from event + translated severity
             if (activeWarning.headline) {
                 warningDesc = activeWarning.headline;
             } else {
@@ -1213,7 +1315,7 @@
             } else if (activeWarning.severity === 'Severe') {
                 warningColor = 'orange'; warningIcon = 'warning';
             } else {
-                warningColor = 'amber'; warningIcon = 'info'; // Moderate
+                warningColor = 'amber'; warningIcon = 'info'; 
             }
         }
 
@@ -1231,6 +1333,13 @@
             </div>
           </div>
         `;
+
+        // Logic for Agro Prognoza Card
+        const agroMeteo = state.agroMeteo || {};
+        
+        const agroPeriod = agroMeteo.forecastPeriod || "Učitavanje...";
+        // Use forecast (p_ssz) for the Home screen card
+        const agroForecastText = agroMeteo.forecast ? agroMeteo.forecast.substring(0, 150) + (agroMeteo.forecast.length > 150 ? '...' : '') : "Dohvaćanje agrometeorološke prognoze...";
 
         return `
           <div class="fade-in flex flex-col gap-4 p-4 pb-28 md:p-8 max-w-7xl mx-auto w-full">
@@ -1298,21 +1407,24 @@
                   <div class="flex items-center justify-between mb-6">
                     <h3 class="text-[#111418] dark:text-white text-lg font-bold">Prognoza</h3>
                     <button onclick="toggleForecast()" class="text-primary text-sm font-bold hover:underline">
-                        ${state.isForecastExpanded ? 'Manje' : '7 Dana'}
+                        ${state.isForecastExpanded ? 'Manje' : '10 Dana'}
                     </button>
                   </div>
                   <div class="flex flex-col gap-6">
                     ${forecastHtml || '<div class="text-center text-gray-500 text-sm py-4">Učitavanje prognoze...</div>'}
                   </div>
                 </div>
+                
+                 <!-- Agro Prognoza Card -->
                  <div class="bg-green-50 dark:bg-green-900/10 rounded-2xl p-6 shadow-sm border border-green-100 dark:border-green-900/30">
                   <div class="flex items-center gap-2 mb-3">
                     <span class="material-symbols-outlined text-green-600 dark:text-green-500">agriculture</span>
-                    <h3 class="text-green-800 dark:text-green-500 font-bold uppercase text-xs tracking-wider">Agro Savjet</h3>
+                    <h3 class="text-green-800 dark:text-green-500 font-bold uppercase text-xs tracking-wider">Agro Prognoza</h3>
                   </div>
-                  <h4 class="font-bold text-[#111418] dark:text-white mb-2">Priprema tla za sjetvu</h4>
-                  <p class="text-sm text-gray-600 dark:text-gray-400 leading-relaxed mb-3">
-                      Idealni uvjeti za pripremu tla za proljetnu sjetvu kukuruza. Preporuča se zatvaranje brazde.
+                  <p class="text-[10px] uppercase font-bold text-green-700 dark:text-green-400 mb-2 opacity-80">${agroPeriod}</p>
+                  
+                  <p class="text-sm text-gray-600 dark:text-gray-400 leading-relaxed mb-3 line-clamp-4">
+                      ${agroForecastText}
                   </p>
                   <button onclick="navigate('${VIEW_STATE.AGRO}')" class="text-green-700 dark:text-green-400 text-sm font-bold flex items-center gap-1 hover:gap-2 transition-all">
                     Otvori Agro Kutak <span class="material-symbols-outlined text-sm">arrow_forward</span>
@@ -1371,7 +1483,6 @@
           const locationName = activeLoc.type === 'manual' ? activeLoc.name : (state.nearestStation ? state.nearestStation.naziv : 'Moja Lokacija');
 
           const rowsHtml = hours.map(h => {
-              // Get Symbol Logic
               let symCode = h.symbol || 'cloudy';
               if(symCode.includes('_')) symCode = symCode.split('_')[0];
               const symbolData = MET_SYMBOLS[symCode] || { icon: 'cloud', class: 'text-gray-400' };
@@ -1597,6 +1708,101 @@
         `;
       }
 
+      function renderAgro() {
+          const articlesHtml = state.isAgroLoading ? `
+             <div class="flex justify-center flex-col items-center p-12 gap-4">
+                <span class="material-symbols-outlined animate-spin text-4xl text-primary">progress_activity</span>
+                <p class="text-sm text-gray-500">Učitavanje detaljnih preporuka...</p>
+            </div>
+          ` : state.agroData.length > 0 ? state.agroData.map(article => `
+            <div class="group flex flex-col bg-white dark:bg-surface-dark rounded-xl overflow-hidden shadow-sm border border-gray-100 dark:border-gray-800 hover:shadow-md transition">
+                <div class="h-40 ${article.bg} relative flex items-center justify-center overflow-hidden">
+                <div class="absolute inset-0 bg-gradient-to-tr from-white/20 to-transparent dark:from-black/20"></div>
+                <span class="material-symbols-outlined ${article.color} text-7xl opacity-80 group-hover:scale-110 transition duration-500">
+                    ${article.icon}
+                </span>
+                <div class="absolute top-3 left-3 bg-white/90 dark:bg-black/60 backdrop-blur-sm px-2.5 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider text-[#111418] dark:text-white shadow-sm">
+                    ${article.category}
+                </div>
+                </div>
+                <div class="p-4 flex flex-col gap-2">
+                <h3 class="text-lg font-bold text-[#111418] dark:text-white leading-tight">${article.title}</h3>
+                <p class="text-sm text-gray-600 dark:text-gray-400 line-clamp-4 leading-relaxed">${article.summary}</p>
+                
+                <div class="pt-3 flex items-center justify-between mt-auto border-t border-gray-100 dark:border-gray-800">
+                    <div class="flex items-center gap-1 text-xs text-gray-500 dark:text-gray-500">
+                    <span class="material-symbols-outlined text-[14px]">schedule</span>
+                    <span>${article.date}</span>
+                    </div>
+                    <a href="${article.link}" target="_blank" rel="noopener noreferrer" class="flex items-center gap-1 text-primary text-sm font-medium hover:underline">
+                    Pročitaj više
+                    <span class="material-symbols-outlined text-sm">arrow_forward</span>
+                    </a>
+                </div>
+                </div>
+            </div>
+          `).join('') : `
+             <div class="text-center p-8 text-gray-500">Nema dostupnih savjeta. Provjerite vezu.</div>
+          `;
+          
+          const forecastText = state.agroMeteo && state.agroMeteo.forecast ? state.agroMeteo.forecast : "Dohvaćanje prognoze...";
+          const forecastPeriod = state.agroMeteo && state.agroMeteo.forecastPeriod ? `(${state.agroMeteo.forecastPeriod})` : "";
+          
+          const outlookText = state.agroMeteo && state.agroMeteo.outlook ? state.agroMeteo.outlook : "Dohvaćanje izgleda vremena...";
+          const outlookPeriod = state.agroMeteo && state.agroMeteo.outlookPeriod ? `(${state.agroMeteo.outlookPeriod})` : "";
+          
+          const stanjeText = state.agroMeteo && state.agroMeteo.stanje ? state.agroMeteo.stanje : "Dohvaćanje stanja...";
+
+          return `
+           <div class="fade-in flex flex-col gap-4 p-4 md:p-8 max-w-2xl mx-auto w-full pb-28">
+              <div class="flex flex-col gap-1 mt-2">
+                <h1 class="text-2xl font-bold tracking-tight text-[#111418] dark:text-white">Agro Kutak</h1>
+                <p class="text-gray-500 dark:text-gray-400 text-sm">Stručni savjeti i agrometeorološke prognoze.</p>
+                <div class="flex gap-4">
+                    <a href="https://savjetodavna.mps.hr/preporuke/?tx_post_tag=koprivnicko-krizevacka" target="_blank" rel="noopener noreferrer" class="text-xs text-primary font-medium hover:underline w-fit">Posjeti MPS</a>
+                    <a href="https://meteo.hr" target="_blank" rel="noopener noreferrer" class="text-xs text-primary font-medium hover:underline w-fit">Posjeti DHMZ</a>
+                </div>
+              </div>
+
+              <div class="flex flex-col gap-4">
+                  <!-- Agro Stanje Card -->
+                  <div class="bg-amber-50 dark:bg-amber-900/10 rounded-xl p-5 shadow-sm border border-amber-100 dark:border-amber-900/30">
+                     <div class="flex items-center gap-2 mb-3">
+                        <span class="material-symbols-outlined text-amber-600 dark:text-amber-500">info</span>
+                        <h3 class="text-amber-800 dark:text-amber-500 font-bold uppercase text-xs tracking-wider">Trenutno Stanje</h3>
+                     </div>
+                     <p class="text-sm text-gray-700 dark:text-gray-300 leading-relaxed whitespace-pre-wrap">${stanjeText}</p>
+                  </div>
+                  
+                  <!-- Agro Prognoza Card (P-SSZ) -->
+                  <div class="bg-green-50 dark:bg-green-900/10 rounded-xl p-5 shadow-sm border border-green-100 dark:border-green-900/30">
+                     <div class="flex items-center gap-2 mb-3">
+                        <span class="material-symbols-outlined text-green-600 dark:text-green-500">agriculture</span>
+                        <h3 class="text-green-800 dark:text-green-500 font-bold uppercase text-xs tracking-wider">Agro Prognoza (P-SSZ) <span class="normal-case opacity-70 ml-1">${forecastPeriod}</span></h3>
+                     </div>
+                     <p class="text-sm text-gray-700 dark:text-gray-300 leading-relaxed whitespace-pre-wrap">${forecastText}</p>
+                  </div>
+
+                  <!-- Agro Outlook Card -->
+                  <div class="bg-blue-50 dark:bg-blue-900/10 rounded-xl p-5 shadow-sm border border-blue-100 dark:border-blue-900/30">
+                     <div class="flex items-center gap-2 mb-3">
+                        <span class="material-symbols-outlined text-blue-600 dark:text-blue-500">calendar_month</span>
+                        <h3 class="text-blue-800 dark:text-blue-500 font-bold uppercase text-xs tracking-wider">Agro Izgledi (Unutrašnjost) <span class="normal-case opacity-70 ml-1">${outlookPeriod}</span></h3>
+                     </div>
+                     <p class="text-sm text-gray-700 dark:text-gray-300 leading-relaxed whitespace-pre-wrap">${outlookText}</p>
+                  </div>
+              </div>
+
+              <h3 class="font-bold text-sm uppercase text-gray-500 dark:text-gray-400 tracking-wider mt-2">Savjeti (MPS)</h3>
+
+              <!-- Articles List -->
+              <div class="flex flex-col gap-4 mt-1">
+                 ${articlesHtml}
+              </div>
+           </div>
+          `;
+      }
+
       function renderSettings() {
         const locationsList = state.locations.map((loc, index) => {
             const isActive = index === state.activeLocationIndex;
@@ -1694,19 +1900,15 @@
       // --- Main Render Function ---
 
       function render() {
-        // Cleanup existing map if leaving home
         if (state.activeTab !== VIEW_STATE.HOME && mapInstance && document.getElementById('map-home')) {
              mapInstance.remove();
              mapInstance = null;
         }
 
-        // Clear logic specific to route
         app.innerHTML = '';
         
-        // 1. Static Layout (Nav/Sidebar)
         app.insertAdjacentHTML('beforeend', renderNav());
 
-        // 2. Main Content Wrapper
         let contentHtml = '';
         if (state.activeTab !== VIEW_STATE.RADAR && state.activeTab !== VIEW_STATE.SETTINGS) {
            contentHtml += renderHeader();
@@ -1732,7 +1934,6 @@
         mainContainer.innerHTML = contentHtml;
         app.appendChild(mainContainer);
 
-        // Post-render: Init Map if needed
         if (state.activeTab === VIEW_STATE.HOME) {
             setTimeout(initMap, 50);
         } else if (state.activeTab === VIEW_STATE.RADAR) {
@@ -1740,25 +1941,22 @@
         }
       }
 
-      // --- Init ---
-      
       function init() {
         loadLocations();
         getUserLocation();
 
-        // Initial Fetch
         fetchWeatherData();
         fetchWarnings();
+        // Dohvati Agro podatke odmah da bi bili spremni za prikaz na pocetnoj stranici
+        fetchAgroData(); 
+        fetchAgroMeteoHr();
         
-        // Polling
-        setInterval(fetchWeatherData, 10 * 60 * 1000); // Every 10 mins
-        setInterval(fetchWarnings, 30 * 60 * 1000); // Every 30 mins
+        setInterval(fetchWeatherData, 10 * 60 * 1000); 
+        setInterval(fetchWarnings, 30 * 60 * 1000); 
 
-        // Initial Render
         render();
       }
 
-      // Start
       init();
 
     </script>
