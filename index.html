@@ -732,35 +732,97 @@
           if (activeLoc.lat && activeLoc.lon) { const userIcon = L.divIcon({ className: 'custom-div-icon', html: `<div class="relative flex h-3 w-3"><span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75"></span><span class="relative inline-flex rounded-full h-3 w-3 bg-blue-500 border-2 border-white shadow-md"></span></div>`, iconSize: [12, 12], iconAnchor: [6, 6] }); L.marker([activeLoc.lat, activeLoc.lon], { icon: userIcon, zIndexOffset: 1000 }).addTo(markersLayer); }
       }
 
-      function initRadarMap() {
+function initRadarMap() {
         const mapEl = document.getElementById('map-radar');
         if (!mapEl) return;
         if (mapInstance) mapInstance.remove();
         const activeLoc = getActiveLocation();
         const lat = activeLoc.lat || 46.16;
         const lon = activeLoc.lon || 16.83;
-        mapInstance = L.map('map-radar', { zoomControl: false, attributionControl: false, dragging: true, scrollWheelZoom: false, doubleClickZoom: false, touchZoom: false, boxZoom: false, keyboard: false }).setView([lat, lon], 9);
-        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: 'OSM', opacity: 0.6, minZoom: 9, maxZoom: 9 }).addTo(mapInstance);
-        const ProxyWMS = L.TileLayer.WMS.extend({ getTileUrl: function(coords) { const url = L.TileLayer.WMS.prototype.getTileUrl.call(this, coords); return 'https://corsproxy.io/?' + encodeURIComponent(url); } });
+        
+        // Ograniči zoom na razine gdje WMS servis radi dobro
+        mapInstance = L.map('map-radar', { 
+          zoomControl: true, 
+          attributionControl: false, 
+          dragging: true, 
+          scrollWheelZoom: true, 
+          doubleClickZoom: true, 
+          touchZoom: true,
+          minZoom: 7,
+          maxZoom: 10
+        }).setView([lat, lon], 9);
+        
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { 
+          attribution: 'OSM', 
+          opacity: 0.6,
+          minZoom: 7,
+          maxZoom: 10
+        }).addTo(mapInstance);
+        
+        const ProxyWMS = L.TileLayer.WMS.extend({ 
+          getTileUrl: function(coords) { 
+            const url = L.TileLayer.WMS.prototype.getTileUrl.call(this, coords); 
+            return 'https://corsproxy.io/?' + encodeURIComponent(url); 
+          } 
+        });
+        
         state.radarFrames = [];
         const now = new Date();
         const buffer = 10; 
         const minutes = now.getMinutes();
         const startMinutes = minutes - (minutes % 10) - buffer;
         now.setMinutes(startMinutes); now.setSeconds(0); now.setMilliseconds(0);
+        
         for (let i = 6; i >= 0; i--) {
             const t = new Date(now.getTime() - i * 10 * 60000);
             const pad = (n) => n.toString().padStart(2, '0');
             const termin = `${t.getFullYear()}-${pad(t.getMonth()+1)}-${pad(t.getDate())} ${pad(t.getHours())}:${pad(t.getMinutes())}:00`;
-            const layer = new ProxyWMS("https://meteopodaci.dhz.hr/wms", { layers: 'radar:mv_117_1', format: 'image/png', transparent: true, uppercase: true, CQL_FILTER: `termin='${termin}'`, opacity: 0 });
-            state.radarFrames.push({ layer: layer, time: `${pad(t.getHours())}:${pad(t.getMinutes())}`, timestamp: t.getTime() });
+            const layer = new ProxyWMS("https://meteopodaci.dhz.hr/wms", { 
+              layers: 'radar:mv_117_1', 
+              format: 'image/png', 
+              transparent: true, 
+              uppercase: true, 
+              CQL_FILTER: `termin='${termin}'`,
+              opacity: 0,
+              minZoom: 7,
+              maxZoom: 10
+            });
+            state.radarFrames.push({ 
+              layer: layer, 
+              time: `${pad(t.getHours())}:${pad(t.getMinutes())}`, 
+              timestamp: t.getTime(),
+              termin: termin
+            });
             layer.addTo(mapInstance);
         }
+        
         state.currentRadarIndex = state.radarFrames.length - 1;
+        
+        // Odmah prikaži trenutni frame
+        state.radarFrames[state.currentRadarIndex].layer.setOpacity(0.8);
         updateRadarFrame();
-        if (activeLoc.lat && activeLoc.lon) { const userIcon = L.divIcon({ className: 'custom-div-icon', html: `<div class="relative flex h-4 w-4"><span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75"></span><span class="relative inline-flex rounded-full h-4 w-4 bg-blue-500 border-2 border-white shadow-md"></span></div>`, iconSize: [16, 16], iconAnchor: [8, 8] }); L.marker([activeLoc.lat, activeLoc.lon], { icon: userIcon, zIndexOffset: 1000 }).addTo(mapInstance); }
+        
+        // Listener za zoom - refresh layera
+        mapInstance.on('zoomend', function() {
+          state.radarFrames.forEach(frame => {
+            frame.layer.redraw();
+          });
+        });
+        
+        if (activeLoc.lat && activeLoc.lon) { 
+          const userIcon = L.divIcon({ 
+            className: 'custom-div-icon', 
+            html: `<div class="relative flex h-4 w-4"><span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75"></span><span class="relative inline-flex rounded-full h-4 w-4 bg-blue-500 border-2 border-white shadow-md"></span></div>`, 
+            iconSize: [16, 16], 
+            iconAnchor: [8, 8] 
+          }); 
+          L.marker([activeLoc.lat, activeLoc.lon], { icon: userIcon, zIndexOffset: 1000 }).addTo(mapInstance); 
+        }
+        
         setTimeout(() => { mapInstance.invalidateSize(); }, 200);
       }
+
+
       function updateRadarFrame() { state.radarFrames.forEach((frame, idx) => { frame.layer.setOpacity(idx === state.currentRadarIndex ? 0.8 : 0); }); const slider = document.getElementById('radar-slider'); const timeDisplay = document.getElementById('radar-time-display'); if (slider) slider.value = state.currentRadarIndex; if (timeDisplay) timeDisplay.textContent = state.radarFrames[state.currentRadarIndex]?.time || '--:--'; }
       function toggleRadar() { state.radarPlaying = !state.radarPlaying; const btn = document.getElementById('radar-play-btn'); if(btn) { const icon = btn.querySelector('span'); icon.textContent = state.radarPlaying ? 'pause' : 'play_arrow'; } if (state.radarPlaying) { radarInterval = setInterval(() => { state.currentRadarIndex = (state.currentRadarIndex + 1) % state.radarFrames.length; updateRadarFrame(); }, 1000); } else { clearInterval(radarInterval); } }
       function onRadarSliderChange(val) { state.currentRadarIndex = parseInt(val); updateRadarFrame(); if (state.radarPlaying) toggleRadar(); }
