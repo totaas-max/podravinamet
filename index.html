@@ -696,7 +696,7 @@
         const timeString = getLatestMeasurementTime();
         state.lastUpdated = timeString;
         const proxyUrl = 'https://corsproxy.io/?';
-        const baseUrl = 'https://meteopodaci.dhz.hr/wfs';
+        const baseUrl = 'https://api.met.com.hr/api/dhmz';
         const requests = Object.keys(MEASUREMENT_IDS).map(id => {
              const params = new URLSearchParams({ 
                  request: 'GetFeature', 
